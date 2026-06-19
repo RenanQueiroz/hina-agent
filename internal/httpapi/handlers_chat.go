@@ -95,14 +95,18 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	// 1. Persist the user turn + checkpoint events.
+	// 1. Persist the user turn together with its UserTextSubmitted event
+	//    atomically, on a non-cancelled context: once the message is accepted it
+	//    must be durable, and the turn must never outlive its event (the timeline
+	//    replays from events, so a turn with no event would vanish on reload).
 	userTurn := store.Turn{ID: id.New("trn"), ConversationID: conv.ID, Role: "user", Mode: "text", CanonicalText: body.Text}
-	if err := s.store.AppendTurn(ctx, userTurn); err != nil {
+	userEvt := s.newEvent(events.SourceClient, events.TypeUserTextSubmitted, conv.ID, u.ID, userTurn.ID,
+		map[string]string{"text": body.Text})
+	if _, err := s.bus.PublishTurn(context.Background(), userTurn, userEvt); err != nil {
+		s.log.Error("persist user turn", "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.publish(ctx, events.SourceClient, events.TypeUserTextSubmitted, conv.ID, u.ID, userTurn.ID,
-		map[string]string{"text": body.Text})
 
 	// 2. Build model context from the full canonical history (includes this turn).
 	turns, err := s.store.ListTurns(ctx, conv.ID)
@@ -140,24 +144,25 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	interrupted := ctx.Err() != nil
 
-	// 4. Finalize, using a fresh context so a client disconnect still records
-	//    what was generated.
-	pctx := context.Background()
+	// 4. Finalize on a non-cancelled context so a client disconnect still records
+	//    what was generated. The assistant turn and its durable event(s) are
+	//    persisted atomically (PublishTurn), so the turn never outlives its event.
 	text := sb.String()
 
 	// A real mid-stream failure (not a client-initiated interrupt) is NOT a
 	// successful turn: record the partial as errored, emit ErrorEvent, close the
 	// turn, and return 502 — never AgentTextCompleted.
 	if streamErr != nil && !interrupted {
-		if err := s.store.AppendTurn(pctx, store.Turn{
+		assistantTurn := store.Turn{
 			ID: asTurnID, ConversationID: conv.ID, Role: "assistant", Mode: "text",
 			CanonicalText: text, Metadata: `{"error":true}`,
-		}); err != nil {
+		}
+		errEvt := s.newEvent(events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
+			map[string]string{"error": streamErr.Error()})
+		commitEvt := s.newEvent(events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil)
+		if _, err := s.bus.PublishTurn(context.Background(), assistantTurn, errEvt, commitEvt); err != nil {
 			s.log.Error("persist failed assistant turn", "err", err)
 		}
-		s.publish(pctx, events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
-			map[string]string{"error": streamErr.Error()})
-		s.publish(pctx, events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil)
 		writeErr(w, http.StatusBadGateway, "llm stream error")
 		return
 	}
@@ -166,15 +171,16 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	if interrupted {
 		meta = `{"interrupted":true}`
 	}
-	if err := s.store.AppendTurn(pctx, store.Turn{
+	assistantTurn := store.Turn{
 		ID: asTurnID, ConversationID: conv.ID, Role: "assistant", Mode: "text",
 		CanonicalText: text, Metadata: meta,
-	}); err != nil {
+	}
+	completedEvt := s.newEvent(events.SourceServer, events.TypeAgentTextCompleted, conv.ID, u.ID, asTurnID,
+		map[string]any{"text": text, "interrupted": interrupted})
+	commitEvt := s.newEvent(events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil)
+	if _, err := s.bus.PublishTurn(context.Background(), assistantTurn, completedEvt, commitEvt); err != nil {
 		s.log.Error("persist assistant turn", "err", err)
 	}
-	s.publish(pctx, events.SourceServer, events.TypeAgentTextCompleted, conv.ID, u.ID, asTurnID,
-		map[string]any{"text": text, "interrupted": interrupted})
-	s.publish(pctx, events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil)
 
 	if interrupted {
 		return // client is gone; response write would fail
@@ -231,6 +237,20 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case e, open := <-ch:
 			if !open {
+				// The bus poisoned this subscriber (its buffer overflowed). Flush
+				// every persisted event we missed from the store, then return so
+				// the browser's EventSource reconnects (Last-Event-ID=lastSeq) and
+				// resumes — no persisted event is lost.
+				if missed, err := s.bus.Replay(ctx, conv.ID, lastSeq); err == nil {
+					for _, m := range missed {
+						if m.Seq <= lastSeq {
+							continue
+						}
+						writeSSE(w, m)
+						lastSeq = m.Seq
+					}
+					flusher.Flush()
+				}
 				return
 			}
 			lastSeq = s.deliverEvent(ctx, w, conv.ID, e, lastSeq)
@@ -328,6 +348,18 @@ func (s *Server) publish(ctx context.Context, source, typ, convID, userID, turnI
 	if _, err := s.bus.Publish(ctx, e); err != nil {
 		s.log.Error("publish event", "type", typ, "err", err)
 	}
+}
+
+// newEvent builds an event for atomic turn+event persistence. If payload
+// marshaling somehow fails it logs and falls back to an empty payload so the
+// event still carries its correct type and ids (never a malformed/empty event).
+func (s *Server) newEvent(source, typ, convID, userID, turnID string, payload any) events.Event {
+	e, err := events.New(source, typ, convID, userID, turnID, payload)
+	if err != nil {
+		s.log.Error("build event payload", "type", typ, "err", err)
+		e, _ = events.New(source, typ, convID, userID, turnID, nil)
+	}
+	return e
 }
 
 func conversationView(c store.Conversation) wire.Conversation {

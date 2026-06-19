@@ -42,6 +42,71 @@ func (s *Store) AppendEvent(ctx context.Context, e *Event) error {
 	return tx.Commit()
 }
 
+// AppendTurnWithEvents persists a turn and its durable event(s) in a single
+// transaction (bumping the conversation's updated_at), assigning each event a
+// per-conversation monotonic seq. Either everything commits or nothing does, so
+// a turn can never end up persisted without the event that announces it — the
+// event log is what the timeline replays from, so a turn with no event would
+// silently vanish on reload while still feeding model context. Callers must
+// serialize appends per conversation (the bus does, under its mutex) so the seq
+// assignment cannot race. Each event's Seq/ServerTS are filled in on the passed
+// pointers.
+func (s *Store) AppendTurnWithEvents(ctx context.Context, t Turn, evs []*Event) error {
+	if t.CreatedAt.IsZero() {
+		t.CreatedAt = nowUTC()
+	}
+	if t.Mode == "" {
+		t.Mode = "text"
+	}
+	if t.Metadata == "" {
+		t.Metadata = "{}"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO turns(id, conversation_id, role, mode, canonical_text, metadata, created_at)
+		 VALUES(?,?,?,?,?,?,?)`,
+		t.ID, t.ConversationID, t.Role, t.Mode, t.CanonicalText, t.Metadata, formatTime(t.CreatedAt),
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE conversations SET updated_at=? WHERE id=?`, formatTime(t.CreatedAt), t.ConversationID,
+	); err != nil {
+		return err
+	}
+
+	for _, e := range evs {
+		if e.ServerTS.IsZero() {
+			e.ServerTS = nowUTC()
+		}
+		if e.Payload == "" {
+			e.Payload = "{}"
+		}
+		var next int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE conversation_id IS ?`,
+			nullStr(e.ConversationID),
+		).Scan(&next); err != nil {
+			return err
+		}
+		e.Seq = next
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO events(event_id, conversation_id, user_id, turn_id, seq, source, type, payload, server_ts)
+			 VALUES(?,?,?,?,?,?,?,?,?)`,
+			e.EventID, nullStr(e.ConversationID), nullStr(e.UserID), nullStr(e.TurnID),
+			e.Seq, e.Source, e.Type, e.Payload, formatTime(e.ServerTS),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ListEventsSince returns events for a conversation with seq > sinceSeq, in
 // order. Used for reconnect/replay.
 func (s *Store) ListEventsSince(ctx context.Context, conversationID string, sinceSeq int64) ([]Event, error) {

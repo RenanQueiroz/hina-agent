@@ -41,6 +41,12 @@ func NewOpenAIResponsesProvider(apiKey, model, baseURL string) *OpenAIResponsesP
 	if apiKey != "" {
 		opts = append(opts, option.WithAPIKey(apiKey))
 	}
+	return newOpenAIResponsesProvider(model, opts...)
+}
+
+// newOpenAIResponsesProvider builds the provider from raw SDK options. It is the
+// seam tests use to inject a custom base URL and HTTP client.
+func newOpenAIResponsesProvider(model string, opts ...option.RequestOption) *OpenAIResponsesProvider {
 	return &OpenAIResponsesProvider{client: openai.NewClient(opts...), model: model}
 }
 
@@ -79,6 +85,9 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req Request) (<-ch
 	out := make(chan Delta)
 	go func() {
 		defer close(out)
+		// Close the SDK stream on every exit path (done, error, ctx cancel) so
+		// the underlying HTTP response body/connection is never leaked.
+		defer stream.Close()
 		for stream.Next() {
 			ev := stream.Current()
 			if ev.Type != "response.output_text.delta" || ev.Delta == "" {

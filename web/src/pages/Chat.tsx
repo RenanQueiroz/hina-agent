@@ -24,8 +24,15 @@ export function ChatPage() {
   }, [conversations.data, selectedId]);
 
   // Reset the timeline when switching conversations; SSE replay rebuilds it.
+  // On switching away (or unmounting), abort any in-flight assistant stream:
+  // without this the POST and the upstream LLM call keep running after the user
+  // navigates away (Phase 2 navigate-away cancellation requirement).
   useEffect(() => {
     setMessages([]);
+    return () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
   }, [selectedId]);
 
   const onEvent = useCallback((e: ServerEvent) => {
