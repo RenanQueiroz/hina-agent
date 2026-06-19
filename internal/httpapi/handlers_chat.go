@@ -266,8 +266,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch, cancel := s.bus.Subscribe(conv.ID)
-	defer cancel()
+	sub := s.bus.Subscribe(conv.ID)
+	defer sub.Cancel()
+	ch := sub.Events
 
 	// Initial catch-up replay. A failure here is a stream setup failure: return
 	// without emitting anything so we never advance the client past unsent
@@ -291,11 +292,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case e, open := <-ch:
 			if !open {
-				// The bus poisoned this subscriber (its buffer overflowed). Flush
-				// every persisted event we missed from the store, then return so
-				// the browser's EventSource reconnects (Last-Event-ID=lastSeq) and
-				// resumes — no persisted event is lost. If even this replay fails we
-				// still return without advancing, so reconnect retries the range.
+				// The bus poisoned this subscriber (its buffer overflowed). If it
+				// was poisoned by a non-persisted terminal failure, emit that event
+				// first — it can't be replayed from the store, so this is the only
+				// way the client learns the turn failed.
+				if f := sub.Failure(); f != nil {
+					writeSSE(w, *f)
+				}
+				// Flush every persisted event we missed from the store, then return
+				// so the browser's EventSource reconnects (Last-Event-ID=lastSeq)
+				// and resumes — no persisted event is lost. If even this replay
+				// fails we still return without advancing, so reconnect retries.
 				if recovered, err := s.bus.Replay(ctx, conv.ID, lastSeq); err == nil {
 					for _, m := range recovered {
 						if m.Seq <= lastSeq {

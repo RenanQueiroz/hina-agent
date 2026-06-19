@@ -19,17 +19,44 @@ import (
 // SSE handler replays the remainder from the store and the browser reconnects —
 // see fanoutDurable and the SSE handler. Only *ephemeral* deltas (seq==0) are
 // disposable on a full buffer; their text is carried durably by
-// AgentTextCompleted.
+// AgentTextCompleted. A non-persisted terminal failure (PublishLiveFailure) also
+// poisons a full subscriber, but records the failure on the subscription so the
+// SSE handler can emit it to the client before the stream ends (it can't be
+// replayed).
 type Bus struct {
 	mu      sync.Mutex
 	store   *store.Store
-	subs    map[string]map[int]chan Event // conversationID -> subID -> chan
+	subs    map[string]map[int]*subscriber // conversationID -> subID -> subscriber
 	nextSub int
 }
 
+// subscriber is one live event consumer. failure, set under the bus mutex when a
+// non-replayable terminal failure poisons the subscriber, is the SSE handler's
+// cue to emit that failure to the client before the closed channel ends the
+// stream (it cannot be recovered via store replay).
+type subscriber struct {
+	ch      chan Event
+	failure *Event
+}
+
+// Subscription is a live event subscription handle.
+type Subscription struct {
+	Events <-chan Event
+	cancel func()
+	sub    *subscriber
+}
+
+// Cancel unsubscribes and closes the event channel.
+func (s *Subscription) Cancel() { s.cancel() }
+
+// Failure returns the non-persisted terminal failure event that poisoned this
+// subscription, or nil. Read it only after Events has been observed closed; the
+// close establishes the happens-before edge with the bus's write.
+func (s *Subscription) Failure() *Event { return s.sub.failure }
+
 // NewBus constructs a bus backed by the given store.
 func NewBus(st *store.Store) *Bus {
-	return &Bus{store: st, subs: make(map[string]map[int]chan Event)}
+	return &Bus{store: st, subs: make(map[string]map[int]*subscriber)}
 }
 
 // Publish persists the event (filling in EventID/Seq/ServerTS) and fans it out.
@@ -165,7 +192,23 @@ func (b *Bus) PublishLiveFailure(e Event) {
 	if len(e.Payload) == 0 {
 		e.Payload = []byte("{}")
 	}
-	b.fanoutDurable(e)
+	failure := e // stable copy to hand to poisoned subscribers
+	m := b.subs[e.ConversationID]
+	for subID, sb := range m {
+		select {
+		case sb.ch <- e:
+		default:
+			// Full buffer: this event can't be replayed (it's non-persisted), so
+			// record it as the poison reason — the SSE handler writes it to the
+			// client before the closed channel ends the stream — then close.
+			sb.failure = &failure
+			close(sb.ch)
+			delete(m, subID)
+		}
+	}
+	if m != nil && len(m) == 0 {
+		delete(b.subs, e.ConversationID)
+	}
 }
 
 // fanoutDurable delivers a persisted (seq>0) event to live subscribers. A
@@ -177,11 +220,11 @@ func (b *Bus) PublishLiveFailure(e Event) {
 // called with b.mu held.
 func (b *Bus) fanoutDurable(e Event) {
 	m := b.subs[e.ConversationID]
-	for subID, ch := range m {
+	for subID, sb := range m {
 		select {
-		case ch <- e:
+		case sb.ch <- e:
 		default:
-			close(ch)
+			close(sb.ch)
 			delete(m, subID)
 		}
 	}
@@ -209,43 +252,43 @@ func (b *Bus) PublishEphemeral(e Event) {
 	}
 	// Ephemeral deltas are replaceable, so a full buffer simply drops them; the
 	// durable AgentTextCompleted carries the canonical text.
-	for _, ch := range b.subs[e.ConversationID] {
+	for _, sb := range b.subs[e.ConversationID] {
 		select {
-		case ch <- e:
+		case sb.ch <- e:
 		default:
 		}
 	}
 }
 
-// Subscribe returns a channel of events for a conversation plus a cancel func.
-// Callers typically replay missed events from the store first, then stream live
-// from this channel.
-func (b *Bus) Subscribe(conversationID string) (<-chan Event, func()) {
+// Subscribe registers a live subscriber for a conversation and returns a
+// Subscription. Callers typically replay missed events from the store first,
+// then stream live from sub.Events; on close they may read sub.Failure().
+func (b *Bus) Subscribe(conversationID string) *Subscription {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.subs[conversationID] == nil {
-		b.subs[conversationID] = make(map[int]chan Event)
+		b.subs[conversationID] = make(map[int]*subscriber)
 	}
 	subID := b.nextSub
 	b.nextSub++
-	ch := make(chan Event, 64)
-	b.subs[conversationID][subID] = ch
+	sb := &subscriber{ch: make(chan Event, 64)}
+	b.subs[conversationID][subID] = sb
 
 	cancel := func() {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		if m := b.subs[conversationID]; m != nil {
-			if c, ok := m[subID]; ok {
+			if cur, ok := m[subID]; ok {
 				delete(m, subID)
-				close(c)
+				close(cur.ch)
 			}
 			if len(m) == 0 {
 				delete(b.subs, conversationID)
 			}
 		}
 	}
-	return ch, cancel
+	return &Subscription{Events: sb.ch, cancel: cancel, sub: sb}
 }
 
 // Replay returns persisted events for a conversation with seq > sinceSeq.

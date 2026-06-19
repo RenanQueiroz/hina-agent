@@ -32,8 +32,9 @@ func TestBusPublishSubscribeReplay(t *testing.T) {
 	}
 
 	bus := NewBus(st)
-	ch, cancel := bus.Subscribe(conv.ID)
-	defer cancel()
+	sub := bus.Subscribe(conv.ID)
+	defer sub.Cancel()
+	ch := sub.Events
 
 	e, _ := New(SourceServer, TypeSessionCreated, conv.ID, u.ID, "", map[string]string{"title": "hi"})
 	pub, err := bus.Publish(ctx, e)
@@ -93,8 +94,9 @@ func TestPublishPoisonsOverflowedSubscriber(t *testing.T) {
 	}
 
 	bus := NewBus(st)
-	ch, cancel := bus.Subscribe(conv.ID)
-	defer cancel()
+	sub := bus.Subscribe(conv.ID)
+	defer sub.Cancel()
+	ch := sub.Events
 
 	// Publish well past the 64-deep buffer WITHOUT draining, so a send fails and
 	// poisons the subscriber.
@@ -159,15 +161,17 @@ func TestPublishLiveFailureIsNotLossy(t *testing.T) {
 	bus := NewBus(st)
 
 	// full: a subscriber whose buffer we fill (ephemeral deltas) without draining.
-	full, cancelFull := bus.Subscribe(conv.ID)
-	defer cancelFull()
+	fullSub := bus.Subscribe(conv.ID)
+	defer fullSub.Cancel()
+	full := fullSub.Events
 	for i := 0; i < 200; i++ {
 		bus.PublishEphemeral(Event{ConversationID: conv.ID, Source: SourceServer, Type: TypeAgentTextDelta})
 	}
 
 	// roomy: subscribed after the fill, so its buffer is empty.
-	roomy, cancelRoomy := bus.Subscribe(conv.ID)
-	defer cancelRoomy()
+	roomySub := bus.Subscribe(conv.ID)
+	defer roomySub.Cancel()
+	roomy := roomySub.Events
 
 	bus.PublishLiveFailure(Event{ConversationID: conv.ID, Source: SourceServer, Type: TypeError})
 
@@ -202,5 +206,12 @@ func TestPublishLiveFailureIsNotLossy(t *testing.T) {
 	case <-closed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("full subscriber was not poisoned on a non-lossy failure under backpressure")
+	}
+
+	// And the failure is recorded on the subscription so the SSE handler can
+	// still emit it to the poisoned client before the stream ends.
+	f := fullSub.Failure()
+	if f == nil || f.Type != TypeError {
+		t.Fatalf("poisoned subscriber lost the terminal failure (Failure()=%v)", f)
 	}
 }

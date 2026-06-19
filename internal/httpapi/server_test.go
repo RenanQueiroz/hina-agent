@@ -599,8 +599,9 @@ func TestFinalizeFailureNotifiesSubscriber(t *testing.T) {
 	postJSON(t, client, ts.URL+"/api/v1/conversations", map[string]string{}, &conv)
 
 	// A second live viewer subscribed to the same conversation.
-	sub, cancelSub := bus.Subscribe(conv.ID)
-	defer cancelSub()
+	subscription := bus.Subscribe(conv.ID)
+	defer subscription.Cancel()
+	sub := subscription.Events
 
 	done := make(chan int, 1)
 	go func() {
