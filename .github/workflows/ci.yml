@@ -65,24 +65,43 @@ jobs:
           PORT=8791
           "$BIN" server --port "$PORT" &
           SRV_PID=$!
+          # On Git Bash for Windows, $! is the MSYS pseudo-pid, but taskkill and
+          # tasklist operate on the native Windows PID. Translate via
+          # /proc/<pid>/winpid (fall back to the bash pid if unavailable). Without
+          # this the kill targets the wrong PID and hina.exe leaks as an orphan,
+          # which is exactly the regression this smoke is meant to catch.
+          WINPID="$SRV_PID"
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then
+            WINPID="$(cat /proc/$SRV_PID/winpid 2>/dev/null || echo "$SRV_PID")"
+          fi
+          stop_server() {
+            if [ "${RUNNER_OS:-}" = "Windows" ]; then
+              taskkill //PID "$WINPID" //T //F >/dev/null 2>&1 || true
+            else
+              kill "$SRV_PID" 2>/dev/null || true
+            fi
+          }
+          server_alive() {
+            if [ "${RUNNER_OS:-}" = "Windows" ]; then
+              tasklist //FI "PID eq $WINPID" //NH 2>/dev/null | grep -qw "$WINPID"
+            else
+              kill -0 "$SRV_PID" 2>/dev/null
+            fi
+          }
           ready=0
           for _ in $(seq 1 60); do
             if curl -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1; then ready=1; break; fi
             sleep 0.5
           done
           if [ "$ready" != "1" ]; then
-            echo "server never became ready"; kill "$SRV_PID" 2>/dev/null || true; exit 1
+            echo "server never became ready"; stop_server; exit 1
           fi
           echo "readyz OK"
           # Terminate and assert the process is gone (no orphan / clean stop).
-          if [ "${RUNNER_OS:-}" = "Windows" ]; then
-            taskkill //PID "$SRV_PID" //T //F >/dev/null 2>&1 || true
-          else
-            kill "$SRV_PID" 2>/dev/null || true
-          fi
+          stop_server
           gone=0
           for _ in $(seq 1 40); do
-            if ! kill -0 "$SRV_PID" 2>/dev/null; then gone=1; break; fi
+            if ! server_alive; then gone=1; break; fi
             sleep 0.25
           done
           if [ "$gone" != "1" ]; then echo "server process lingered after termination"; exit 1; fi
