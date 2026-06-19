@@ -2,3 +2,6 @@ node_modules
 *.local
 .vite
 vite.config.ts.timestamp-*
+test-results
+playwright-report
+.playwright
