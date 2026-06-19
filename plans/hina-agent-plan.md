@@ -3,6 +3,16 @@
 Date: 2026-06-13
 Updated: 2026-06-19
 
+> **Companion docs (added 2026-06-18).** This file remains the canonical vision /
+> architecture document. The implementation is now broken into phases — see
+> [`roadmap.md`](roadmap.md) (index + dependency graph) and
+> [`phase-01-foundation.md`](phase-01-foundation.md) … [`phase-11-windows-hardening.md`](phase-11-windows-hardening.md).
+> The open research/spike items and the "clarify before first code" decisions are
+> resolved in [`research-findings.md`](research-findings.md), which is authoritative
+> where it and this document differ (see its Part D for specific corrections).
+> Naming note: "Phase 2" in this title means the **V2 product** (vs. the V1 Python
+> app); it is unrelated to implementation **Phase 1–11** in `roadmap.md`.
+
 ## Goal
 
 Design and build a v2 voice-agent architecture that feels like talking to a person:
@@ -1515,6 +1525,13 @@ Run the benchmark harness against:
 
 ## Implementation Readiness Review
 
+> **Status (2026-06-18):** The "Clarify before first code" items below are RESOLVED
+> in [`research-findings.md`](research-findings.md) Part A and built in
+> [`phase-01-foundation.md`](phase-01-foundation.md). The "Research or spike before
+> dependent feature work" items are resolved in `research-findings.md` Part B, except
+> the hardware-gated ones (Part C, mostly Phase 11). Kept here for context;
+> `research-findings.md` is authoritative.
+
 The plan is ready to start a narrow bootstrap only after the first-code
 clarifications below are closed. Do not wait for every local-voice,
 Windows-runtime, or Automation spike before creating the initial server, config,
@@ -1689,6 +1706,16 @@ Research or spike before dependent feature work:
 - For LAN HTTPS, support user-provided cert/key and document `mkcert` / reverse proxy setup. Do not spend v2 milestone time trying to auto-install trusted local CAs.
 
 ## Remaining Spikes
+
+> **Status (2026-06-18):** The docs/library/licensing spikes here are CLOSED in
+> [`research-findings.md`](research-findings.md) Part B with chosen libraries and
+> versions. The remaining open spikes are code/hardware tasks owned by their phase in
+> [`roadmap.md`](roadmap.md) — the native-Windows spikes are gathered into
+> [`phase-11-windows-hardening.md`](phase-11-windows-hardening.md). See
+> `research-findings.md` Part D for corrections that supersede earlier statements in
+> this document (e.g. `CODEX_API_KEY` removed, `--full-auto` deprecated, local Opus
+> encoding avoided via PCM-over-datachannel, OpenAI Realtime `call_id` from the
+> `Location` header).
 
 - Build the native Windows 11 x64 platform spike: install/run server from
   PowerShell, create app state/cache directories, run SQLite migrations, start
