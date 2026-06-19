@@ -337,10 +337,12 @@ func TestErroredTurnReplayParity(t *testing.T) {
 }
 
 // blockingProvider streams nothing until release is closed, so a turn can be
-// held in flight while the test issues a second concurrent POST.
+// held in flight (e.g. while the test issues a second POST or breaks the store).
+// If failAfterRelease is set it emits a stream error instead of completing.
 type blockingProvider struct {
-	started chan struct{}
-	release chan struct{}
+	started          chan struct{}
+	release          chan struct{}
+	failAfterRelease bool
 }
 
 func (b *blockingProvider) Name() string { return "blocking" }
@@ -355,10 +357,98 @@ func (b *blockingProvider) Stream(ctx context.Context, _ llm.Request) (<-chan ll
 		case <-ctx.Done():
 			return
 		}
+		if b.failAfterRelease {
+			ch <- llm.Delta{Text: "partial"}
+			ch <- llm.Delta{Err: errors.New("backend boom")}
+			return
+		}
 		ch <- llm.Delta{Text: "ok"}
 		ch <- llm.Delta{Done: true}
 	}()
 	return ch, nil
+}
+
+// postWhileStoreBroken runs a message POST against a provider that blocks until
+// the test closes the store mid-stream, so finalization persistence fails. It
+// returns the HTTP status the POST ended with.
+func postWhileStoreBroken(t *testing.T, failAfterRelease bool) int {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	prov := &blockingProvider{started: make(chan struct{}), release: make(chan struct{}), failAfterRelease: failAfterRelease}
+	srv := New(
+		config.Default(), st, events.NewBus(st), auth.NewManager(st, false),
+		prov, logbuf.New(50),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	srv.SetReady(true)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	boot, _ := auth.EnsureAdmin(ctx, st)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	postJSON(t, client, ts.URL+"/api/v1/auth/login",
+		map[string]string{"username": "admin", "password": boot.Password}, nil)
+	var conv struct {
+		ID string `json:"id"`
+	}
+	postJSON(t, client, ts.URL+"/api/v1/conversations", map[string]string{}, &conv)
+
+	done := make(chan int, 1)
+	go func() {
+		b, _ := json.Marshal(map[string]string{"text": "hi"})
+		resp, err := client.Post(ts.URL+"/api/v1/conversations/"+conv.ID+"/messages",
+			"application/json", strings.NewReader(string(b)))
+		if err != nil {
+			done <- -1
+			return
+		}
+		_ = resp.Body.Close()
+		done <- resp.StatusCode
+	}()
+
+	select {
+	case <-prov.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream never started")
+	}
+	// The user turn already persisted (store was open); break it so the
+	// assistant finalization's PublishTurn fails.
+	_ = st.Close()
+	close(prov.release)
+
+	select {
+	case code := <-done:
+		return code
+	case <-time.After(3 * time.Second):
+		t.Fatal("POST never completed")
+		return 0
+	}
+}
+
+// TestFinalizePersistFailureReturns500 proves a normal assistant reply is NOT
+// acknowledged as success when its durable finalization fails — the client must
+// not believe a turn persisted that replay and BuildContext would lack.
+func TestFinalizePersistFailureReturns500(t *testing.T) {
+	if code := postWhileStoreBroken(t, false); code != http.StatusInternalServerError {
+		t.Fatalf("POST with failed finalization = %d, want 500", code)
+	}
+}
+
+// TestErroredFinalizePersistFailureReturns502 proves the failed-turn path stays
+// an error (never a false success) when its persistence also fails.
+func TestErroredFinalizePersistFailureReturns502(t *testing.T) {
+	if code := postWhileStoreBroken(t, true); code != http.StatusBadGateway {
+		t.Fatalf("errored POST with failed finalization = %d, want 502", code)
+	}
 }
 
 // TestConcurrentPostReturns409 proves turns are serialized per conversation: a

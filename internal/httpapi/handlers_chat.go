@@ -198,7 +198,15 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		map[string]any{"text": text, "interrupted": interrupted})
 	commitEvt := s.newEvent(events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil)
 	if _, err := s.bus.PublishTurn(context.Background(), assistantTurn, completedEvt, commitEvt); err != nil {
+		// Finalization is part of the request's commit. If the assistant turn
+		// isn't durable, don't acknowledge success: the client would believe a
+		// turn persisted that replay and BuildContext lack. (If the client is
+		// already gone, there's no response to send — the log is the record.)
 		s.log.Error("persist assistant turn", "err", err)
+		if !interrupted {
+			writeErr(w, http.StatusInternalServerError, "internal error")
+		}
+		return
 	}
 
 	if interrupted {
