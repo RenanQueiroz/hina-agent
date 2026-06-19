@@ -46,11 +46,12 @@ type LLMConfig struct {
 
 // ServerConfig controls binding and TLS.
 type ServerConfig struct {
-	Host       string `toml:"host"`        // default 127.0.0.1
-	Port       int    `toml:"port"`        // default 8733
-	LANEnabled bool   `toml:"lan_enabled"` // required to bind a non-loopback host
-	TLSCert    string `toml:"tls_cert"`
-	TLSKey     string `toml:"tls_key"`
+	Host        string `toml:"host"`         // default 127.0.0.1
+	Port        int    `toml:"port"`         // default 8733
+	LANEnabled  bool   `toml:"lan_enabled"`  // required to bind a non-loopback host
+	LANInsecure bool   `toml:"lan_insecure"` // opt out of the LAN-requires-TLS rule (dev only)
+	TLSCert     string `toml:"tls_cert"`
+	TLSKey      string `toml:"tls_key"`
 }
 
 // AgentConfig holds the spoken-agent identity (used later by ASR name biasing).
@@ -107,6 +108,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("HINA_SERVER_LAN"); v != "" {
 		c.Server.LANEnabled = v == "1" || v == "true"
 	}
+	if v := os.Getenv("HINA_SERVER_LAN_INSECURE"); v != "" {
+		c.Server.LANInsecure = v == "1" || v == "true"
+	}
 	if v := os.Getenv("HINA_AGENT_NAME"); v != "" {
 		c.Agent.Name = v
 	}
@@ -151,6 +155,13 @@ func (c Config) Validate() error {
 	}
 	if !c.Server.IsLoopbackBind() && !c.Server.LANEnabled {
 		return fmt.Errorf("server.host %q is non-loopback; set server.lan_enabled=true (or HINA_SERVER_LAN=1) to allow LAN binding", c.Server.Host)
+	}
+	// A non-loopback bind serves session cookies; those must travel over TLS.
+	// "LAN clients still authenticate — no trusted network" (Phase 1): cleartext
+	// cookies on the LAN are exactly the leak the plan forbids. Refuse unless TLS
+	// is configured, or the operator explicitly opts into insecure dev LAN.
+	if !c.Server.IsLoopbackBind() && c.Server.LANEnabled && !c.Server.TLSEnabled() && !c.Server.LANInsecure {
+		return fmt.Errorf("server.host %q is non-loopback without TLS: set server.tls_cert/tls_key, or server.lan_insecure=true (HINA_SERVER_LAN_INSECURE=1) to allow cleartext LAN (NOT recommended — session cookies would be sent unencrypted)", c.Server.Host)
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

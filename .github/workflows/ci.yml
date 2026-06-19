@@ -46,6 +46,43 @@ jobs:
         run: go run ./cmd/hina migrate
       - name: Doctor smoke (non-interactive)
         run: go run ./cmd/hina doctor --json
+      - name: Server smoke (start the real binary, /readyz, stop, no orphan)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Isolate app dirs (per-OS bases) so the smoke never touches a profile.
+          ROOT="$(mktemp -d)"
+          export XDG_CONFIG_HOME="$ROOT/config" XDG_CACHE_HOME="$ROOT/cache" XDG_DATA_HOME="$ROOT/data"
+          export AppData="$ROOT/appdata" LocalAppData="$ROOT/localappdata"
+          BIN="$ROOT/hina"
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then BIN="$ROOT/hina.exe"; fi
+          go build -o "$BIN" ./cmd/hina
+          "$BIN" setup
+          PORT=8791
+          "$BIN" server --port "$PORT" &
+          SRV_PID=$!
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1; then ready=1; break; fi
+            sleep 0.5
+          done
+          if [ "$ready" != "1" ]; then
+            echo "server never became ready"; kill "$SRV_PID" 2>/dev/null || true; exit 1
+          fi
+          echo "readyz OK"
+          # Terminate and assert the process is gone (no orphan / clean stop).
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then
+            taskkill //PID "$SRV_PID" //T //F >/dev/null 2>&1 || true
+          else
+            kill "$SRV_PID" 2>/dev/null || true
+          fi
+          gone=0
+          for _ in $(seq 1 40); do
+            if ! kill -0 "$SRV_PID" 2>/dev/null; then gone=1; break; fi
+            sleep 0.25
+          done
+          if [ "$gone" != "1" ]; then echo "server process lingered after termination"; exit 1; fi
+          echo "server stopped, no orphan"
 
   cross-compile:
     name: cross-compile targets

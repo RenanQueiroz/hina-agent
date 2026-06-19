@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -182,6 +183,74 @@ func TestStreamErrorReturns502(t *testing.T) {
 	}
 	if hasCompleted {
 		t.Error("must not emit AgentTextCompleted on a stream error")
+	}
+}
+
+// TestChangePasswordRevokesSessions proves a session minted under the old
+// (bootstrap) password is dead after the password changes, while the caller's
+// reissued session keeps working. This closes the bootstrap-credential-survives
+// hole behind the LAN gate.
+func TestChangePasswordRevokesSessions(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	srv := New(
+		config.Default(), st, events.NewBus(st), auth.NewManager(st, false),
+		llm.NewMockProvider(), logbuf.New(50),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	srv.SetReady(true)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	boot, err := auth.EnsureAdmin(ctx, st)
+	if err != nil || !boot.Created {
+		t.Fatalf("bootstrap admin: %v (%+v)", err, boot)
+	}
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	postJSON(t, client, ts.URL+"/api/v1/auth/login",
+		map[string]string{"username": "admin", "password": boot.Password}, nil)
+
+	// Capture the pre-change session cookie before it gets replaced.
+	u, _ := url.Parse(ts.URL)
+	var oldCookie *http.Cookie
+	for _, c := range jar.Cookies(u) {
+		if c.Name == "hina_session" {
+			oldCookie = c
+		}
+	}
+	if oldCookie == nil {
+		t.Fatal("no session cookie after login")
+	}
+
+	// Change the password; the jar transparently picks up the reissued cookie.
+	postJSON(t, client, ts.URL+"/api/v1/auth/change-password",
+		map[string]string{"current_password": boot.Password, "new_password": "newpassword123"}, nil)
+
+	// The OLD cookie must now be rejected on an authenticated route.
+	bare := &http.Client{}
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/auth/me", nil)
+	req.AddCookie(oldCookie)
+	resp, err := bare.Do(req)
+	if err != nil {
+		t.Fatalf("me with old cookie: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old cookie after password change = %d, want 401", resp.StatusCode)
+	}
+
+	// The reissued session (in the jar) still works.
+	if got := getStatus(t, client, ts.URL+"/api/v1/auth/me"); got != http.StatusOK {
+		t.Fatalf("reissued session /me = %d, want 200", got)
 	}
 }
 

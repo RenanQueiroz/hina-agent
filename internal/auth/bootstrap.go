@@ -64,13 +64,16 @@ func Authenticate(ctx context.Context, st *store.Store, username, password strin
 	return u, nil
 }
 
-// ChangePassword sets a new password for a user (clears must_change_password).
+// ChangePassword sets a new password for a user (clears must_change_password)
+// and revokes all of the user's existing login sessions, so a credential issued
+// under the old password cannot outlive the change. Callers that want the
+// current request to stay logged in must reissue a session afterward.
 func ChangePassword(ctx context.Context, st *store.Store, userID, newPassword string) error {
 	hash, err := HashPassword(newPassword)
 	if err != nil {
 		return err
 	}
-	return st.UpdateUserPassword(ctx, userID, hash)
+	return st.UpdateUserPasswordAndRevokeSessions(ctx, userID, hash)
 }
 
 // LANAllowed reports whether LAN binding is permitted — i.e. no admin still

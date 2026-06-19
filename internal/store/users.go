@@ -85,13 +85,27 @@ func (s *Store) CountAdminsRequiringPasswordChange(ctx context.Context) (int, er
 	return n, err
 }
 
-// UpdateUserPassword sets a new password hash and clears must_change_password.
-func (s *Store) UpdateUserPassword(ctx context.Context, id, passwordHash string) error {
-	_, err := s.db.ExecContext(ctx,
+// UpdateUserPasswordAndRevokeSessions sets a new password hash, clears the
+// must_change_password flag, and deletes ALL of the user's login sessions — all
+// in one transaction. Revoking sessions is what makes the bootstrap flow safe:
+// a session minted under the one-time bootstrap password (or any old password)
+// must not survive the change and become usable once LAN binding is unlocked.
+func (s *Store) UpdateUserPasswordAndRevokeSessions(ctx context.Context, id, passwordHash string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE users SET password_hash=?, must_change_password=0, updated_at=? WHERE id=?`,
 		passwordHash, formatTime(nowUTC()), id,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 const userSelect = `SELECT id, username, role, password_hash, status, must_change_password, created_at, updated_at FROM users`

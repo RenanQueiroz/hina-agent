@@ -25,13 +25,16 @@ type OpenAIResponsesProvider struct {
 // The SDK reads OPENAI_* env vars by default, so we defend against the V1
 // footguns: always pin the base URL (a stray OPENAI_BASE_URL can't redirect
 // cloud traffic), only set the API key when configured (an empty config key
-// must not clobber a real OPENAI_API_KEY), and strip org/project headers.
+// must not clobber a real OPENAI_API_KEY), strip org/project headers, and pin a
+// no-proxy HTTP client (trust_env=false) so HTTP(S)_PROXY can't intercept the
+// request or the bearer API key. Timeout is 0: streaming is cancelled via ctx.
 func NewOpenAIResponsesProvider(apiKey, model, baseURL string) *OpenAIResponsesProvider {
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
 	opts := []option.RequestOption{
 		option.WithBaseURL(baseURL),
+		option.WithHTTPClient(noProxyHTTPClient(0)),
 		option.WithHeaderDel("OpenAI-Organization"),
 		option.WithHeaderDel("OpenAI-Project"),
 	}

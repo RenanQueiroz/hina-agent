@@ -33,7 +33,9 @@ func NewOpenAICompatProvider(baseURL, apiKey, model string) *OpenAICompatProvide
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
 		Model:   model,
-		client:  &http.Client{Timeout: 5 * time.Minute},
+		// No-proxy client (trust_env=false): HTTP(S)_PROXY must never intercept
+		// model traffic or the bearer API key. 5-minute cap for a stalled stream.
+		client: noProxyHTTPClient(5 * time.Minute),
 	}
 }
 

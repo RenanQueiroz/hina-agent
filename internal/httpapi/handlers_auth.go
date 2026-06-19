@@ -70,6 +70,14 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// ChangePassword revoked every session for this user (including the one used
+	// for this request). Reissue a fresh session so the caller stays logged in;
+	// any other/older cookie is now dead.
+	if err := s.auth.Login(r.Context(), w, u.ID); err != nil {
+		s.log.Error("reissue session after password change", "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

@@ -13,7 +13,11 @@ import (
 // Bus persists events (assigning a per-conversation seq) and fans them out to
 // in-process subscribers. A single mutex serializes publishes so the store's
 // seq assignment never races; fan-out uses buffered channels with non-blocking
-// sends — a lagging subscriber simply replays from the store on reconnect.
+// sends so one slow subscriber can never stall the publisher (which is on the
+// LLM streaming path). A dropped *persisted* event is not lost: the seq gap is
+// detected and replayed from the store by the consumer (see deliverEvent in the
+// SSE handler), and a full reconnect replays from the last seq as a backstop.
+// Dropped *ephemeral* deltas (seq==0) are intentionally disposable.
 type Bus struct {
 	mu      sync.Mutex
 	store   *store.Store
@@ -59,7 +63,7 @@ func (b *Bus) Publish(ctx context.Context, e Event) (Event, error) {
 	for _, ch := range b.subs[e.ConversationID] {
 		select {
 		case ch <- e:
-		default: // subscriber lagging; it catches up via replay
+		default: // buffer full; consumer detects the seq gap and replays from the store
 		}
 	}
 	return e, nil
