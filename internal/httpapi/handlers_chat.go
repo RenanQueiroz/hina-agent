@@ -229,8 +229,13 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) finalizeTurn(convID, userID, turnID, text string, turn store.Turn, evs ...events.Event) bool {
 	if _, err := s.bus.PublishTurn(context.Background(), turn, evs...); err != nil {
 		s.log.Error("persist assistant turn", "turn", turnID, "err", err)
-		s.publishEphemeral(events.SourceServer, events.TypeError, convID, userID, turnID,
-			map[string]any{"error": "failed to persist reply", "text": text})
+		// The durable terminal events are exactly what failed, so this failure
+		// can't be replayed. Fan it out non-lossily (poison-on-full) so no live
+		// viewer silently misses it — never via the lossy ephemeral-delta path.
+		if e, nerr := events.New(events.SourceServer, events.TypeError, convID, userID, turnID,
+			map[string]any{"error": "failed to persist reply", "text": text}); nerr == nil {
+			s.bus.PublishLiveFailure(e)
+		}
 		return false
 	}
 	return true

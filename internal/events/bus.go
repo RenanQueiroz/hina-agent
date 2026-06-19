@@ -146,6 +146,28 @@ func (b *Bus) PublishConversation(ctx context.Context, c store.Conversation, e E
 	return e, nil
 }
 
+// PublishLiveFailure fans out a NON-persisted terminal failure event (e.g. an
+// assistant turn whose durable finalization failed, so there is nothing to
+// persist or replay). Unlike PublishEphemeral it must not be silently dropped:
+// it uses the same poison-on-full semantics as durable events, so a lagging
+// subscriber is force-disconnected (to reconnect/re-sync) rather than missing
+// the only signal that the turn failed. Subscribers with buffer room receive it
+// live (seq==0). Used only on the rare finalization-failure path.
+func (b *Bus) PublishLiveFailure(e Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if e.EventID == "" {
+		e.EventID = id.New("evt")
+	}
+	if e.ServerTS.IsZero() {
+		e.ServerTS = time.Now().UTC()
+	}
+	if len(e.Payload) == 0 {
+		e.Payload = []byte("{}")
+	}
+	b.fanoutDurable(e)
+}
+
 // fanoutDurable delivers a persisted (seq>0) event to live subscribers. A
 // subscriber whose buffer is full is *poisoned* — its channel is closed and
 // removed — rather than having the event silently dropped: the SSE handler sees

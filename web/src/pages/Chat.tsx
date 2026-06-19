@@ -38,7 +38,13 @@ export function ChatPage() {
   const onEvent = useCallback((e: ServerEvent) => {
     setMessages((prev) => reduceEvent(prev, e));
   }, []);
-  useConversationEvents(selectedId, onEvent);
+  const onDisconnect = useCallback(() => {
+    // Stop pulsing any in-progress draft on disconnect. If the turn is healthy,
+    // its terminal event re-arrives on reconnect and re-renders it; if its
+    // finalization failed, it stays a stopped partial instead of hanging live.
+    setMessages((prev) => prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)));
+  }, []);
+  useConversationEvents(selectedId, onEvent, onDisconnect);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });

@@ -133,3 +133,74 @@ func TestPublishPoisonsOverflowedSubscriber(t *testing.T) {
 		t.Fatalf("replay = %d events, want %d (persisted events must not be lost)", len(replay), n)
 	}
 }
+
+// TestPublishLiveFailureIsNotLossy proves a terminal failure signal is never
+// silently dropped under backpressure: a subscriber with a full buffer is
+// poisoned (forced to reconnect/re-sync), while a subscriber with room observes
+// the ErrorEvent live.
+func TestPublishLiveFailureIsNotLossy(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "ev.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	u := store.User{ID: id.New("usr"), Username: "u", Role: "user", PasswordHash: "x"}
+	if err := st.CreateUser(ctx, u); err != nil {
+		t.Fatalf("user: %v", err)
+	}
+	conv := store.Conversation{ID: id.New("cnv"), OwnerUserID: u.ID}
+	if err := st.CreateConversation(ctx, conv); err != nil {
+		t.Fatalf("conversation: %v", err)
+	}
+	bus := NewBus(st)
+
+	// full: a subscriber whose buffer we fill (ephemeral deltas) without draining.
+	full, cancelFull := bus.Subscribe(conv.ID)
+	defer cancelFull()
+	for i := 0; i < 200; i++ {
+		bus.PublishEphemeral(Event{ConversationID: conv.ID, Source: SourceServer, Type: TypeAgentTextDelta})
+	}
+
+	// roomy: subscribed after the fill, so its buffer is empty.
+	roomy, cancelRoomy := bus.Subscribe(conv.ID)
+	defer cancelRoomy()
+
+	bus.PublishLiveFailure(Event{ConversationID: conv.ID, Source: SourceServer, Type: TypeError})
+
+	// The roomy subscriber observes the failure live (seq==0).
+	gotFailure := false
+	for {
+		select {
+		case e, open := <-roomy:
+			if !open {
+				t.Fatal("roomy subscriber was unexpectedly closed")
+			}
+			if e.Type == TypeError && e.Seq == 0 {
+				gotFailure = true
+			}
+		case <-time.After(time.Second):
+			t.Fatal("roomy subscriber never received the failure event")
+		}
+		if gotFailure {
+			break
+		}
+	}
+
+	// The full subscriber is poisoned: draining it terminates (channel closed)
+	// rather than silently continuing without the failure signal.
+	closed := make(chan struct{})
+	go func() {
+		for range full {
+		}
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("full subscriber was not poisoned on a non-lossy failure under backpressure")
+	}
+}
