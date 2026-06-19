@@ -40,12 +40,16 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	_ = decodeJSON(w, r, &body) // title optional
 
 	conv := store.Conversation{ID: id.New("cnv"), OwnerUserID: u.ID, Title: body.Title}
-	if err := s.store.CreateConversation(r.Context(), conv); err != nil {
+	// Persist the conversation and its SessionCreated event atomically, so the
+	// API never returns a created conversation whose creation event is missing
+	// from the replayed event log.
+	evt := s.newEvent(events.SourceServer, events.TypeSessionCreated, conv.ID, u.ID, "", map[string]string{"title": conv.Title})
+	if _, err := s.bus.PublishConversation(r.Context(), conv, evt); err != nil {
+		s.log.Error("create conversation", "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	conv, _ = s.store.GetConversation(r.Context(), conv.ID)
-	s.publish(r.Context(), events.SourceServer, events.TypeSessionCreated, conv.ID, u.ID, "", map[string]string{"title": conv.Title})
 	writeJSON(w, http.StatusCreated, conversationView(conv))
 }
 
@@ -221,12 +225,18 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	ch, cancel := s.bus.Subscribe(conv.ID)
 	defer cancel()
 
+	// Initial catch-up replay. A failure here is a stream setup failure: return
+	// without emitting anything so we never advance the client past unsent
+	// durable events; EventSource reconnects (Last-Event-ID=since) and retries.
 	lastSeq := since
-	if missed, err := s.bus.Replay(r.Context(), conv.ID, since); err == nil {
-		for _, e := range missed {
-			writeSSE(w, e)
-			lastSeq = e.Seq
-		}
+	missed, err := s.bus.Replay(r.Context(), conv.ID, since)
+	if err != nil {
+		s.log.Error("sse initial replay", "conversation", conv.ID, "err", err)
+		return
+	}
+	for _, e := range missed {
+		writeSSE(w, e)
+		lastSeq = e.Seq
 	}
 	flusher.Flush()
 
@@ -240,9 +250,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				// The bus poisoned this subscriber (its buffer overflowed). Flush
 				// every persisted event we missed from the store, then return so
 				// the browser's EventSource reconnects (Last-Event-ID=lastSeq) and
-				// resumes — no persisted event is lost.
-				if missed, err := s.bus.Replay(ctx, conv.ID, lastSeq); err == nil {
-					for _, m := range missed {
+				// resumes — no persisted event is lost. If even this replay fails we
+				// still return without advancing, so reconnect retries the range.
+				if recovered, err := s.bus.Replay(ctx, conv.ID, lastSeq); err == nil {
+					for _, m := range recovered {
 						if m.Seq <= lastSeq {
 							continue
 						}
@@ -250,50 +261,64 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 						lastSeq = m.Seq
 					}
 					flusher.Flush()
+				} else {
+					s.log.Error("sse replay after poison", "conversation", conv.ID, "err", err)
 				}
 				return
 			}
-			lastSeq = s.deliverEvent(ctx, w, conv.ID, e, lastSeq)
+			next, ok := s.deliverEvent(ctx, w, conv.ID, e, lastSeq)
+			if !ok {
+				// Gap replay failed; terminate without advancing so the browser
+				// reconnects (Last-Event-ID still before the gap) and recovers it.
+				return
+			}
+			lastSeq = next
 			flusher.Flush()
 		}
 	}
 }
 
 // deliverEvent writes a single event to the SSE stream and returns the updated
-// lastSeq. Ephemeral deltas (seq==0) are always delivered live and never advance
-// lastSeq. For persisted events it dedups against what was already sent and, on
-// detecting a gap (e.Seq > lastSeq+1 — i.e. earlier persisted events were
-// dropped from this subscriber's full buffer), replays the missing range from
-// the store before sending. This guarantees a slow client never permanently
-// loses a persisted event such as TurnCommitted/ErrorEvent without needing to
-// reconnect; the bus's non-blocking fan-out stays safe for the publisher.
-func (s *Server) deliverEvent(ctx context.Context, w http.ResponseWriter, convID string, e events.Event, lastSeq int64) int64 {
+// lastSeq plus an ok flag. Ephemeral deltas (seq==0) are always delivered live
+// and never advance lastSeq. For persisted events it dedups against what was
+// already sent and, on detecting a gap (e.Seq > lastSeq+1 — i.e. earlier
+// persisted events were dropped from this subscriber's full buffer), replays the
+// missing range from the store before sending. If that replay fails it returns
+// ok=false WITHOUT writing the later event or advancing lastSeq, so the caller
+// terminates the stream and the browser reconnects (Last-Event-ID still points
+// before the gap) and recovers it — a transient store error never lets the
+// client skip durable events. The bus's non-blocking fan-out stays safe for the
+// publisher.
+func (s *Server) deliverEvent(ctx context.Context, w http.ResponseWriter, convID string, e events.Event, lastSeq int64) (int64, bool) {
 	if e.Seq == 0 { // ephemeral delta: live-only
 		writeSSE(w, e)
-		return lastSeq
+		return lastSeq, true
 	}
 	if e.Seq <= lastSeq { // already delivered via replay/dedup
-		return lastSeq
+		return lastSeq, true
 	}
 	if e.Seq > lastSeq+1 { // gap: persisted events were dropped — replay them
-		if missed, err := s.bus.Replay(ctx, convID, lastSeq); err == nil {
-			for _, m := range missed {
-				if m.Seq <= lastSeq {
-					continue
-				}
-				writeSSE(w, m)
-				lastSeq = m.Seq
+		missed, err := s.bus.Replay(ctx, convID, lastSeq)
+		if err != nil {
+			s.log.Error("sse replay during gap", "conversation", convID, "err", err)
+			return lastSeq, false
+		}
+		for _, m := range missed {
+			if m.Seq <= lastSeq {
+				continue
 			}
-			if e.Seq <= lastSeq { // replay already covered e
-				return lastSeq
-			}
+			writeSSE(w, m)
+			lastSeq = m.Seq
+		}
+		if e.Seq <= lastSeq { // replay already covered e
+			return lastSeq, true
 		}
 	}
 	writeSSE(w, e)
 	if e.Seq > lastSeq {
 		lastSeq = e.Seq
 	}
-	return lastSeq
+	return lastSeq, true
 }
 
 func writeSSE(w http.ResponseWriter, e events.Event) {

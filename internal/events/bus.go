@@ -109,6 +109,43 @@ func (b *Bus) PublishTurn(ctx context.Context, t store.Turn, evs ...Event) ([]Ev
 	return evs, nil
 }
 
+// PublishConversation creates a conversation and its SessionCreated event
+// atomically (one store transaction), then fans the event out. Like PublishTurn,
+// this keeps a conversation from ever existing without the event that announces
+// it. Seq assignment is serialized by the bus mutex. Returns the event with
+// Seq/ServerTS populated.
+func (b *Bus) PublishConversation(ctx context.Context, c store.Conversation, e Event) (Event, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if e.EventID == "" {
+		e.EventID = id.New("evt")
+	}
+	payload := string(e.Payload)
+	if payload == "" {
+		payload = "{}"
+	}
+	se := &store.Event{
+		EventID:        e.EventID,
+		ConversationID: e.ConversationID,
+		UserID:         e.UserID,
+		TurnID:         e.TurnID,
+		Source:         e.Source,
+		Type:           e.Type,
+		Payload:        payload,
+	}
+	if err := b.store.CreateConversationWithEvent(ctx, c, se); err != nil {
+		return Event{}, err
+	}
+	e.Seq = se.Seq
+	e.ServerTS = se.ServerTS
+	if len(e.Payload) == 0 {
+		e.Payload = []byte("{}")
+	}
+	b.fanoutDurable(e)
+	return e, nil
+}
+
 // fanoutDurable delivers a persisted (seq>0) event to live subscribers. A
 // subscriber whose buffer is full is *poisoned* — its channel is closed and
 // removed — rather than having the event silently dropped: the SSE handler sees

@@ -85,3 +85,40 @@ func TestAppendTurnWithEventsRollsBack(t *testing.T) {
 		t.Fatalf("turn must not persist when the event insert fails; got %d turns", len(turns))
 	}
 }
+
+// TestCreateConversationWithEvent proves the conversation and its SessionCreated
+// event commit together, and that a failing event insert rolls back the
+// conversation (never an eventless conversation).
+func TestCreateConversationWithEvent(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	uid, cid := seedConversation(t, st)
+
+	// Happy path: a fresh conversation + its event commit together.
+	c2 := Conversation{ID: id.New("cnv"), OwnerUserID: uid}
+	evt := &Event{EventID: id.New("evt"), ConversationID: c2.ID, UserID: uid, Source: "server", Type: "SessionCreated"}
+	if err := st.CreateConversationWithEvent(ctx, c2, evt); err != nil {
+		t.Fatalf("create conversation with event: %v", err)
+	}
+	if _, err := st.GetConversation(ctx, c2.ID); err != nil {
+		t.Fatalf("conversation not persisted: %v", err)
+	}
+	if evs, _ := st.ListEventsSince(ctx, c2.ID, 0); len(evs) != 1 || evs[0].Seq != 1 {
+		t.Fatalf("events = %+v, want one with seq 1", evs)
+	}
+
+	// Rollback: a duplicate event_id fails the insert, so the conversation must
+	// not be left behind.
+	dup := &Event{EventID: id.New("evt"), ConversationID: cid, UserID: uid, Source: "server", Type: "Seed"}
+	if err := st.AppendEvent(ctx, dup); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	c3 := Conversation{ID: id.New("cnv"), OwnerUserID: uid}
+	bad := &Event{EventID: dup.EventID, ConversationID: c3.ID, UserID: uid, Source: "server", Type: "SessionCreated"}
+	if err := st.CreateConversationWithEvent(ctx, c3, bad); err == nil {
+		t.Fatal("expected duplicate event_id to fail the transaction")
+	}
+	if _, err := st.GetConversation(ctx, c3.ID); err == nil {
+		t.Fatal("conversation must not persist when its event insert fails")
+	}
+}

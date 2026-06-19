@@ -10,33 +10,12 @@ import (
 // the passed pointer. Callers should serialize appends per conversation (the
 // event bus does) so the seq assignment does not race.
 func (s *Store) AppendEvent(ctx context.Context, e *Event) error {
-	if e.ServerTS.IsZero() {
-		e.ServerTS = nowUTC()
-	}
-	if e.Payload == "" {
-		e.Payload = "{}"
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	var next int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE conversation_id IS ?`,
-		nullStr(e.ConversationID),
-	).Scan(&next); err != nil {
-		return err
-	}
-	e.Seq = next
-
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO events(event_id, conversation_id, user_id, turn_id, seq, source, type, payload, server_ts)
-		 VALUES(?,?,?,?,?,?,?,?,?)`,
-		e.EventID, nullStr(e.ConversationID), nullStr(e.UserID), nullStr(e.TurnID),
-		e.Seq, e.Source, e.Type, e.Payload, formatTime(e.ServerTS),
-	); err != nil {
+	if err := insertEventTx(ctx, tx, e); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -81,30 +60,68 @@ func (s *Store) AppendTurnWithEvents(ctx context.Context, t Turn, evs []*Event) 
 	}
 
 	for _, e := range evs {
-		if e.ServerTS.IsZero() {
-			e.ServerTS = nowUTC()
-		}
-		if e.Payload == "" {
-			e.Payload = "{}"
-		}
-		var next int64
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE conversation_id IS ?`,
-			nullStr(e.ConversationID),
-		).Scan(&next); err != nil {
-			return err
-		}
-		e.Seq = next
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO events(event_id, conversation_id, user_id, turn_id, seq, source, type, payload, server_ts)
-			 VALUES(?,?,?,?,?,?,?,?,?)`,
-			e.EventID, nullStr(e.ConversationID), nullStr(e.UserID), nullStr(e.TurnID),
-			e.Seq, e.Source, e.Type, e.Payload, formatTime(e.ServerTS),
-		); err != nil {
+		if err := insertEventTx(ctx, tx, e); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// CreateConversationWithEvent inserts a conversation and its first durable event
+// (SessionCreated) in a single transaction, so the API can never return a
+// created conversation whose creation event is missing from the replayed log
+// (which the timeline and reconnect contract depend on). The event's
+// Seq/ServerTS are filled in on the passed pointer.
+func (s *Store) CreateConversationWithEvent(ctx context.Context, c Conversation, e *Event) error {
+	if c.CreatedAt.IsZero() {
+		c.CreatedAt = nowUTC()
+	}
+	if c.UpdatedAt.IsZero() {
+		c.UpdatedAt = c.CreatedAt
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO conversations(id, owner_user_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
+		c.ID, c.OwnerUserID, c.Title, formatTime(c.CreatedAt), formatTime(c.UpdatedAt),
+	); err != nil {
+		return err
+	}
+	if err := insertEventTx(ctx, tx, e); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// insertEventTx assigns the next per-conversation monotonic seq and inserts the
+// event within tx, filling e.Seq/e.ServerTS. Callers must serialize per
+// conversation (the bus does, under its mutex) so the seq assignment can't race.
+func insertEventTx(ctx context.Context, tx *sql.Tx, e *Event) error {
+	if e.ServerTS.IsZero() {
+		e.ServerTS = nowUTC()
+	}
+	if e.Payload == "" {
+		e.Payload = "{}"
+	}
+	var next int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE conversation_id IS ?`,
+		nullStr(e.ConversationID),
+	).Scan(&next); err != nil {
+		return err
+	}
+	e.Seq = next
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO events(event_id, conversation_id, user_id, turn_id, seq, source, type, payload, server_ts)
+		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		e.EventID, nullStr(e.ConversationID), nullStr(e.UserID), nullStr(e.TurnID),
+		e.Seq, e.Source, e.Type, e.Payload, formatTime(e.ServerTS),
+	)
+	return err
 }
 
 // ListEventsSince returns events for a conversation with seq > sinceSeq, in
