@@ -16,6 +16,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/id"
 	"github.com/RenanQueiroz/hina-agent/internal/llm"
+	"github.com/RenanQueiroz/hina-agent/internal/logbuf"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
 	"github.com/RenanQueiroz/hina-agent/internal/wire"
 	webui "github.com/RenanQueiroz/hina-agent/web"
@@ -28,14 +29,15 @@ type Server struct {
 	bus      *events.Bus
 	auth     *auth.Manager
 	provider llm.Provider
+	logs     *logbuf.Buffer
 	log      *slog.Logger
 	ready    atomic.Bool
 	handler  http.Handler
 }
 
 // New builds the server and its handler.
-func New(cfg config.Config, st *store.Store, bus *events.Bus, am *auth.Manager, provider llm.Provider, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, bus: bus, auth: am, provider: provider, log: log}
+func New(cfg config.Config, st *store.Store, bus *events.Bus, am *auth.Manager, provider llm.Provider, logs *logbuf.Buffer, log *slog.Logger) *Server {
+	s := &Server{cfg: cfg, store: st, bus: bus, auth: am, provider: provider, logs: logs, log: log}
 	s.handler = s.withMiddleware(s.routes())
 	return s
 }
@@ -70,6 +72,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/admin/users", s.requireAdmin(s.handleListUsers))
 	mux.Handle("GET /api/v1/admin/llm", s.requireAdmin(s.handleAdminLLM))
 	mux.Handle("GET /api/v1/admin/runtime", s.requireAdmin(s.handleAdminRuntime))
+	mux.Handle("GET /api/v1/admin/logs", s.requireAdmin(s.handleAdminLogs))
 
 	// SPA: the embedded web client serves all remaining paths (more specific
 	// /healthz, /readyz, /api/v1/* patterns take precedence).

@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
 	"github.com/RenanQueiroz/hina-agent/internal/config"
+	"github.com/RenanQueiroz/hina-agent/internal/logbuf"
 	"github.com/RenanQueiroz/hina-agent/internal/platform"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
 )
@@ -15,6 +17,7 @@ type app struct {
 	paths platform.Paths
 	cfg   config.Config
 	log   *slog.Logger
+	logs  *logbuf.Buffer
 	store *store.Store
 }
 
@@ -36,7 +39,8 @@ func openApp() (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &app{paths: paths, cfg: cfg, log: newLogger(cfg.Log), store: st}, nil
+	logs := logbuf.New(500)
+	return &app{paths: paths, cfg: cfg, logs: logs, log: newLogger(cfg.Log, logs), store: st}, nil
 }
 
 func (a *app) close() {
@@ -45,7 +49,7 @@ func (a *app) close() {
 	}
 }
 
-func newLogger(lc config.LogConfig) *slog.Logger {
+func newLogger(lc config.LogConfig, buf *logbuf.Buffer) *slog.Logger {
 	level := slog.LevelInfo
 	switch lc.Level {
 	case "debug":
@@ -56,9 +60,10 @@ func newLogger(lc config.LogConfig) *slog.Logger {
 		level = slog.LevelError
 	}
 	opts := &slog.HandlerOptions{Level: level}
-	var h slog.Handler = slog.NewTextHandler(os.Stderr, opts)
+	w := io.MultiWriter(os.Stderr, buf) // tee logs to the admin ring buffer
+	var h slog.Handler = slog.NewTextHandler(w, opts)
 	if lc.Format == "json" {
-		h = slog.NewJSONHandler(os.Stderr, opts)
+		h = slog.NewJSONHandler(w, opts)
 	}
 	return slog.New(h)
 }

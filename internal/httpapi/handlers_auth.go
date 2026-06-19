@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/wire"
@@ -103,3 +105,40 @@ func (s *Server) handleAdminRuntime(w http.ResponseWriter, _ *http.Request) {
 		"note":         "runtime status expands in later phases",
 	})
 }
+
+// handleAdminLogs streams server logs (recent + live) over SSE from the
+// in-memory ring buffer. Per-backend log views fill in with those backends.
+func (s *Server) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ch, cancel := s.logs.Subscribe()
+	defer cancel()
+	for _, line := range s.logs.Recent() {
+		fmt.Fprintf(w, "data: %s\n\n", sseSafe(line))
+	}
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case line, open := <-ch:
+			if !open {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", sseSafe(line))
+			flusher.Flush()
+		}
+	}
+}
+
+// sseSafe collapses newlines so a log line stays a single SSE data frame.
+func sseSafe(s string) string { return strings.ReplaceAll(s, "\n", " ") }

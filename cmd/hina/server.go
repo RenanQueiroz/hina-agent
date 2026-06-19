@@ -77,7 +77,7 @@ func cmdServer(args []string) error {
 
 	bus := events.NewBus(a.store)
 	am := auth.NewManager(a.store, a.cfg.Server.TLSEnabled())
-	srv := httpapi.New(a.cfg, a.store, bus, am, provider, a.log)
+	srv := httpapi.New(a.cfg, a.store, bus, am, provider, a.logs, a.log)
 	srv.SetReady(true)
 
 	httpSrv := &http.Server{

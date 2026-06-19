@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, Spinner } from "../components/ui";
@@ -68,6 +69,44 @@ export function AdminPage() {
           </table>
         )}
       </Card>
+
+      <LogsPanel />
     </div>
+  );
+}
+
+function LogsPanel() {
+  const [lines, setLines] = useState<string[]>([]);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const es = new EventSource("/api/v1/admin/logs");
+    es.onmessage = (m) => setLines((prev) => [...prev, m.data].slice(-300));
+    return () => es.close();
+  }, []);
+  useEffect(() => {
+    boxRef.current?.scrollTo(0, boxRef.current.scrollHeight);
+  }, [lines]);
+
+  return (
+    <Card className="p-4">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">
+        Server logs
+      </h2>
+      <div
+        ref={boxRef}
+        className="h-64 overflow-auto rounded-md bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-200"
+      >
+        {lines.length === 0 ? (
+          <span className="text-zinc-500">Waiting for logs…</span>
+        ) : (
+          lines.map((l, i) => (
+            <div key={i} className="whitespace-pre-wrap break-all">
+              {l}
+            </div>
+          ))
+        )}
+      </div>
+    </Card>
   );
 }
