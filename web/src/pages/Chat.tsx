@@ -63,6 +63,18 @@ export function ChatPage() {
         abortRef.current = null;
       }
     },
+    onError: (err) => {
+      // The POST failed (e.g. the server couldn't durably persist the reply, or
+      // the request was aborted). Don't leave a streaming draft pulsing forever:
+      // mark any in-progress assistant bubble as failed. An aborted request is
+      // expected, so don't flag it as an error.
+      const aborted = err instanceof DOMException && err.name === "AbortError";
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.streaming ? { ...m, streaming: false, error: !aborted } : m,
+        ),
+      );
+    },
   });
 
   const submit = () => {

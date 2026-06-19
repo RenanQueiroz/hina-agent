@@ -135,28 +135,31 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	asTurnID := id.New("trn")
 	s.publish(ctx, events.SourceServer, events.TypeTurnStarted, conv.ID, u.ID, asTurnID, nil)
 
-	stream, err := s.provider.Stream(ctx, llm.Request{Messages: msgs})
-	if err != nil {
-		s.publish(context.Background(), events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
-			map[string]string{"error": err.Error()})
-		writeErr(w, http.StatusBadGateway, "llm backend error")
-		return
-	}
-
+	// A failure to even start the stream is funneled through the same
+	// finalization below (set streamErr) so cancellation vs backend-error is
+	// classified by interrupted, and the durable turn+events stay atomic — never
+	// an event-only ErrorEvent for a turn that has no durable assistant turn.
 	var sb strings.Builder
 	var streamErr error
-	for d := range stream {
-		if d.Err != nil {
-			streamErr = d.Err
-			break
+	stream, err := s.provider.Stream(ctx, llm.Request{Messages: msgs})
+	if err != nil {
+		streamErr = err
+	} else {
+		for d := range stream {
+			if d.Err != nil {
+				streamErr = d.Err
+				break
+			}
+			if d.Done {
+				break
+			}
+			sb.WriteString(d.Text)
+			s.publishEphemeral(events.SourceServer, events.TypeAgentTextDelta, conv.ID, u.ID, asTurnID,
+				map[string]string{"delta": d.Text})
 		}
-		if d.Done {
-			break
-		}
-		sb.WriteString(d.Text)
-		s.publishEphemeral(events.SourceServer, events.TypeAgentTextDelta, conv.ID, u.ID, asTurnID,
-			map[string]string{"delta": d.Text})
 	}
+	// A client abort (Stop/navigate-away) can surface as either a stream error or
+	// a context cancellation; either way it's an interrupt, not a backend failure.
 	interrupted := ctx.Err() != nil
 
 	// 4. Finalize on a non-cancelled context so a client disconnect still records
@@ -204,6 +207,11 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		// already gone, there's no response to send — the log is the record.)
 		s.log.Error("persist assistant turn", "err", err)
 		if !interrupted {
+			// Tell live subscribers (this tab and any other viewer) the turn
+			// failed so the streaming bubble shows as failed instead of hanging.
+			// Ephemeral because the durable record is exactly what failed.
+			s.publishEphemeral(events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
+				map[string]any{"error": "failed to persist reply", "text": text})
 			writeErr(w, http.StatusInternalServerError, "internal error")
 		}
 		return

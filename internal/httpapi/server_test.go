@@ -434,6 +434,118 @@ func postWhileStoreBroken(t *testing.T, failAfterRelease bool) int {
 	}
 }
 
+// cancelAwareProvider signals when Stream is entered, then blocks until the
+// request context is cancelled and returns ctx.Err() — i.e. the client aborted
+// before any stream was yielded (the OpenAI-compatible adapter's behavior on a
+// pre-headers Stop/navigate-away).
+type cancelAwareProvider struct {
+	entered chan struct{}
+}
+
+func (p *cancelAwareProvider) Name() string { return "cancel-aware" }
+
+func (p *cancelAwareProvider) Stream(ctx context.Context, _ llm.Request) (<-chan llm.Delta, error) {
+	close(p.entered)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestPreStreamCancellationIsInterrupted proves a client abort before the stream
+// starts is classified as an interrupt (interrupted assistant turn + durable
+// AgentTextCompleted), NOT a backend ErrorEvent for a turn with no durable turn.
+func TestPreStreamCancellationIsInterrupted(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	prov := &cancelAwareProvider{entered: make(chan struct{})}
+	srv := New(
+		config.Default(), st, events.NewBus(st), auth.NewManager(st, false),
+		prov, logbuf.New(50),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	srv.SetReady(true)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	boot, _ := auth.EnsureAdmin(ctx, st)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	postJSON(t, client, ts.URL+"/api/v1/auth/login",
+		map[string]string{"username": "admin", "password": boot.Password}, nil)
+	var conv struct {
+		ID string `json:"id"`
+	}
+	postJSON(t, client, ts.URL+"/api/v1/conversations", map[string]string{}, &conv)
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	body, _ := json.Marshal(map[string]string{"text": "hi"})
+	req, _ := http.NewRequestWithContext(reqCtx, http.MethodPost,
+		ts.URL+"/api/v1/conversations/"+conv.ID+"/messages", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	reqDone := make(chan struct{})
+	go func() {
+		if resp, err := client.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+		close(reqDone)
+	}()
+
+	select {
+	case <-prov.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream was never entered")
+	}
+	cancelReq() // client aborts before any stream is yielded
+
+	select {
+	case <-reqDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("request never returned")
+	}
+
+	// The handler finalizes asynchronously (on a background context); poll for it.
+	deadline := time.Now().Add(2 * time.Second)
+	var hasCompleted, hasError, hasAssistantTurn bool
+	for time.Now().Before(deadline) {
+		evs, _ := st.ListEventsSince(ctx, conv.ID, 0)
+		hasCompleted, hasError = false, false
+		for _, e := range evs {
+			switch e.Type {
+			case events.TypeAgentTextCompleted:
+				hasCompleted = true
+			case events.TypeError:
+				hasError = true
+			}
+		}
+		turns, _ := st.ListTurns(ctx, conv.ID)
+		hasAssistantTurn = false
+		for _, tn := range turns {
+			if tn.Role == "assistant" {
+				hasAssistantTurn = true
+			}
+		}
+		if hasCompleted && hasAssistantTurn {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if hasError {
+		t.Error("pre-stream cancellation must not persist an ErrorEvent")
+	}
+	if !hasCompleted {
+		t.Error("expected a durable interrupted AgentTextCompleted")
+	}
+	if !hasAssistantTurn {
+		t.Error("expected a durable interrupted assistant turn matching the event")
+	}
+}
+
 // TestFinalizePersistFailureReturns500 proves a normal assistant reply is NOT
 // acknowledged as success when its durable finalization fails — the client must
 // not believe a turn persisted that replay and BuildContext would lack.
