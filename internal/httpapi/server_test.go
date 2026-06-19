@@ -740,6 +740,88 @@ func TestConcurrentPostReturns409(t *testing.T) {
 	}
 }
 
+// TestSessionResumedLifecycle proves a fresh event-stream attach emits a durable
+// SessionResumed with the next monotonic seq, while an EventSource auto-reconnect
+// (Last-Event-ID present) does not.
+func TestSessionResumedLifecycle(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	srv := New(
+		config.Default(), st, events.NewBus(st), auth.NewManager(st, false),
+		llm.NewMockProvider(), logbuf.New(50),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	srv.SetReady(true)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	boot, _ := auth.EnsureAdmin(ctx, st)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	postJSON(t, client, ts.URL+"/api/v1/auth/login",
+		map[string]string{"username": "admin", "password": boot.Password}, nil)
+	var conv struct {
+		ID string `json:"id"`
+	}
+	postJSON(t, client, ts.URL+"/api/v1/conversations", map[string]string{}, &conv) // SessionCreated seq 1
+
+	openStream := func(lastEventID string) context.CancelFunc {
+		reqCtx, cancel := context.WithCancel(context.Background())
+		req, _ := http.NewRequestWithContext(reqCtx, http.MethodGet,
+			ts.URL+"/api/v1/conversations/"+conv.ID+"/events?since=0", nil)
+		if lastEventID != "" {
+			req.Header.Set("Last-Event-ID", lastEventID)
+		}
+		go func() {
+			if resp, err := client.Do(req); err == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+		}()
+		return cancel
+	}
+	resumedEvents := func() []store.Event {
+		evs, _ := st.ListEventsSince(ctx, conv.ID, 0)
+		var out []store.Event
+		for _, e := range evs {
+			if e.Type == events.TypeSessionResumed {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+
+	// Fresh attach (no Last-Event-ID) -> one durable SessionResumed at the next seq.
+	cancel1 := openStream("")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(resumedEvents()) < 1 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel1()
+	got := resumedEvents()
+	if len(got) != 1 {
+		t.Fatalf("fresh attach should emit exactly one SessionResumed, got %d", len(got))
+	}
+	if got[0].Seq != 2 {
+		t.Fatalf("SessionResumed seq = %d, want 2 (next after SessionCreated)", got[0].Seq)
+	}
+
+	// Auto-reconnect (Last-Event-ID present) -> no additional SessionResumed.
+	cancel2 := openStream("2")
+	time.Sleep(300 * time.Millisecond)
+	cancel2()
+	if n := len(resumedEvents()); n != 1 {
+		t.Fatalf("auto-reconnect must not emit SessionResumed (count went to %d)", n)
+	}
+}
+
 func TestSameOrigin(t *testing.T) {
 	mk := func(origin, host string) *http.Request {
 		r := httptest.NewRequest(http.MethodPost, "http://"+host+"/api/v1/x", nil)

@@ -270,6 +270,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer sub.Cancel()
 	ch := sub.Events
 
+	// A fresh attach (no Last-Event-ID) is an intentional (re)open of the
+	// conversation — record a durable SessionResumed lifecycle event. EventSource
+	// auto-reconnects carry Last-Event-ID, so they are not counted as resumes.
+	// Published after Subscribe so this stream also sees it (deduped on replay).
+	if r.Header.Get("Last-Event-ID") == "" {
+		u, _ := auth.UserFrom(r.Context())
+		s.publish(r.Context(), events.SourceServer, events.TypeSessionResumed, conv.ID, u.ID, "", nil)
+	}
+
 	// Initial catch-up replay. A failure here is a stream setup failure: return
 	// without emitting anything so we never advance the client past unsent
 	// durable events; EventSource reconnects (Last-Event-ID=since) and retries.
