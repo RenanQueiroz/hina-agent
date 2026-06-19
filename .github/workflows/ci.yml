@@ -42,8 +42,12 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
-      - name: Migrate smoke (cross-platform)
-        run: go run ./cmd/hina migrate
+      - name: Migrate smoke (up / down / up, cross-platform)
+        run: |
+          go run ./cmd/hina migrate
+          go run ./cmd/hina migrate down all
+          go run ./cmd/hina migrate
+        shell: bash
       - name: Doctor smoke (non-interactive)
         run: go run ./cmd/hina doctor --json
       - name: Server smoke (start the real binary, /readyz, stop, no orphan)

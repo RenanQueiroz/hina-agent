@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/doctor"
@@ -13,14 +14,35 @@ import (
 )
 
 func cmdMigrate(args []string) error {
-	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
-	_ = fs.Parse(args)
-
 	a, err := openApp()
 	if err != nil {
 		return err
 	}
 	defer a.close()
+
+	// `hina migrate`            -> apply pending up migrations
+	// `hina migrate down [N]`   -> roll back the last N (default 1) migrations
+	// `hina migrate down all`   -> roll back everything
+	if len(args) > 0 && args[0] == "down" {
+		steps := 1
+		if len(args) > 1 {
+			if args[1] == "all" {
+				steps = 0
+			} else {
+				n, err := strconv.Atoi(args[1])
+				if err != nil || n < 1 {
+					return fmt.Errorf("migrate down: invalid step count %q", args[1])
+				}
+				steps = n
+			}
+		}
+		n, err := a.store.MigrateDown(context.Background(), steps)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("migrations reverted: %d\n", n)
+		return nil
+	}
 
 	n, err := a.store.Migrate(context.Background())
 	if err != nil {

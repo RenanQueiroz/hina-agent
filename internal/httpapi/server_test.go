@@ -563,6 +563,93 @@ func TestErroredFinalizePersistFailureReturns502(t *testing.T) {
 	}
 }
 
+// TestFinalizeFailureNotifiesSubscriber proves a finalization persistence
+// failure emits an ephemeral ErrorEvent that reaches OTHER live viewers (not
+// just the submitting tab), so their streaming bubble shows as failed instead
+// of hanging forever.
+func TestFinalizeFailureNotifiesSubscriber(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	bus := events.NewBus(st)
+	prov := &blockingProvider{started: make(chan struct{}), release: make(chan struct{})}
+	srv := New(
+		config.Default(), st, bus, auth.NewManager(st, false),
+		prov, logbuf.New(50),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	srv.SetReady(true)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	boot, _ := auth.EnsureAdmin(ctx, st)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	postJSON(t, client, ts.URL+"/api/v1/auth/login",
+		map[string]string{"username": "admin", "password": boot.Password}, nil)
+	var conv struct {
+		ID string `json:"id"`
+	}
+	postJSON(t, client, ts.URL+"/api/v1/conversations", map[string]string{}, &conv)
+
+	// A second live viewer subscribed to the same conversation.
+	sub, cancelSub := bus.Subscribe(conv.ID)
+	defer cancelSub()
+
+	done := make(chan int, 1)
+	go func() {
+		b, _ := json.Marshal(map[string]string{"text": "hi"})
+		resp, err := client.Post(ts.URL+"/api/v1/conversations/"+conv.ID+"/messages",
+			"application/json", strings.NewReader(string(b)))
+		if err != nil {
+			done <- -1
+			return
+		}
+		_ = resp.Body.Close()
+		done <- resp.StatusCode
+	}()
+
+	select {
+	case <-prov.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream never started")
+	}
+	_ = st.Close() // break the store so finalization fails
+	close(prov.release)
+
+	select {
+	case code := <-done:
+		if code != http.StatusInternalServerError {
+			t.Fatalf("POST with failed finalization = %d, want 500", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("POST never completed")
+	}
+
+	// The subscriber must have received an ephemeral (seq==0) ErrorEvent.
+	gotEphemeralError := false
+drain:
+	for {
+		select {
+		case e := <-sub:
+			if e.Type == events.TypeError && e.Seq == 0 {
+				gotEphemeralError = true
+			}
+		default:
+			break drain
+		}
+	}
+	if !gotEphemeralError {
+		t.Fatal("live subscriber did not receive an ephemeral failure event for the unsaved turn")
+	}
+}
+
 // TestConcurrentPostReturns409 proves turns are serialized per conversation: a
 // second POST while one is in flight is rejected with 409, so interleaved turns
 // can't corrupt the durable order or the model context.

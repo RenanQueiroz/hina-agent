@@ -124,7 +124,11 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Build model context from the full canonical history (includes this turn).
-	turns, err := s.store.ListTurns(ctx, conv.ID)
+	//    Use a non-cancelled context: the user turn is already durable, so a
+	//    client abort here must not short-circuit us before the terminal
+	//    assistant finalization — otherwise replay/BuildContext would be left with
+	//    a user-only turn and no interrupted assistant turn.
+	turns, err := s.store.ListTurns(context.Background(), conv.ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
@@ -168,23 +172,20 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	text := sb.String()
 
 	// A real mid-stream failure (not a client-initiated interrupt) is NOT a
-	// successful turn: record the partial as errored, emit ErrorEvent, close the
-	// turn, and return 502 — never AgentTextCompleted.
+	// successful turn: record the partial as errored, emit ErrorEvent + close the
+	// turn, and return 502 — never AgentTextCompleted. (Carry the partial text in
+	// the durable ErrorEvent so reload replays exactly what BuildContext feeds the
+	// model — the live-only AgentTextDelta events aren't replayed.)
 	if streamErr != nil && !interrupted {
 		assistantTurn := store.Turn{
 			ID: asTurnID, ConversationID: conv.ID, Role: "assistant", Mode: "text",
 			CanonicalText: text, Metadata: `{"error":true}`,
 		}
-		// Carry the partial canonical text in the durable ErrorEvent so a reload
-		// replays exactly what BuildContext will feed the model (the live-only
-		// AgentTextDelta events aren't replayed). Keeps UI history and model
-		// context in parity for failed turns.
-		errEvt := s.newEvent(events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
-			map[string]any{"error": streamErr.Error(), "text": text})
-		commitEvt := s.newEvent(events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil)
-		if _, err := s.bus.PublishTurn(context.Background(), assistantTurn, errEvt, commitEvt); err != nil {
-			s.log.Error("persist failed assistant turn", "err", err)
-		}
+		s.finalizeTurn(conv.ID, u.ID, asTurnID, text, assistantTurn,
+			s.newEvent(events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
+				map[string]any{"error": streamErr.Error(), "text": text}),
+			s.newEvent(events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil),
+		)
 		writeErr(w, http.StatusBadGateway, "llm stream error")
 		return
 	}
@@ -197,28 +198,20 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		ID: asTurnID, ConversationID: conv.ID, Role: "assistant", Mode: "text",
 		CanonicalText: text, Metadata: meta,
 	}
-	completedEvt := s.newEvent(events.SourceServer, events.TypeAgentTextCompleted, conv.ID, u.ID, asTurnID,
-		map[string]any{"text": text, "interrupted": interrupted})
-	commitEvt := s.newEvent(events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil)
-	if _, err := s.bus.PublishTurn(context.Background(), assistantTurn, completedEvt, commitEvt); err != nil {
-		// Finalization is part of the request's commit. If the assistant turn
-		// isn't durable, don't acknowledge success: the client would believe a
-		// turn persisted that replay and BuildContext lack. (If the client is
-		// already gone, there's no response to send — the log is the record.)
-		s.log.Error("persist assistant turn", "err", err)
-		if !interrupted {
-			// Tell live subscribers (this tab and any other viewer) the turn
-			// failed so the streaming bubble shows as failed instead of hanging.
-			// Ephemeral because the durable record is exactly what failed.
-			s.publishEphemeral(events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
-				map[string]any{"error": "failed to persist reply", "text": text})
-			writeErr(w, http.StatusInternalServerError, "internal error")
-		}
-		return
-	}
-
+	ok = s.finalizeTurn(conv.ID, u.ID, asTurnID, text, assistantTurn,
+		s.newEvent(events.SourceServer, events.TypeAgentTextCompleted, conv.ID, u.ID, asTurnID,
+			map[string]any{"text": text, "interrupted": interrupted}),
+		s.newEvent(events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil),
+	)
 	if interrupted {
 		return // client is gone; response write would fail
+	}
+	if !ok {
+		// Finalization is part of the request's commit. If the assistant turn
+		// isn't durable, don't acknowledge success: the client would believe a
+		// turn persisted that replay and BuildContext lack.
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
 	}
 	writeJSON(w, http.StatusOK, wire.PostMessageResponse{
 		UserTurnID:      userTurn.ID,
@@ -226,6 +219,21 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		Text:            text,
 		Interrupted:     false,
 	})
+}
+
+// finalizeTurn persists the assistant turn and its terminal events atomically
+// (on a non-cancelled context) and reports whether it succeeded. On any
+// persistence failure it emits an ephemeral ErrorEvent carrying the turn id and
+// partial text, so every live subscriber — not just the submitting tab — sees
+// the turn fail instead of a bubble that streams forever.
+func (s *Server) finalizeTurn(convID, userID, turnID, text string, turn store.Turn, evs ...events.Event) bool {
+	if _, err := s.bus.PublishTurn(context.Background(), turn, evs...); err != nil {
+		s.log.Error("persist assistant turn", "turn", turnID, "err", err)
+		s.publishEphemeral(events.SourceServer, events.TypeError, convID, userID, turnID,
+			map[string]any{"error": "failed to persist reply", "text": text})
+		return false
+	}
+	return true
 }
 
 // handleEvents streams a conversation's events over SSE: subscribe first (to

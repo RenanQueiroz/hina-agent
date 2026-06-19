@@ -48,7 +48,7 @@ Usage:
   hina server     Run the server
   hina setup      Create app dirs, run migrations, bootstrap the admin
   hina doctor     Report host capabilities and feature availability
-  hina migrate    Apply database migrations
+  hina migrate    Apply database migrations (migrate down [N|all] to roll back)
   hina version    Print version
 
 Pass -h after a command for its flags.
