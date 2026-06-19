@@ -1,0 +1,21 @@
+# Keeps SHA-pinned actions and Go modules patched. Pinning actions to commit
+# SHAs (in the workflows) defends against tag-moving supply-chain attacks;
+# Dependabot then bumps those pins so they don't go stale. Grouped so updates
+# arrive as a single reviewable PR per ecosystem.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns: ["*"]

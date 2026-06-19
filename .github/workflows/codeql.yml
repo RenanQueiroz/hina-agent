@@ -1,0 +1,35 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 3 * * 1" # weekly (Mon 03:27 UTC)
+
+# Read-only by default; the analyze job widens to security-events: write only
+# where it must, scoped to that job.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (go)
+    # Same fork guard as ci.yml: never run for pull requests opened from a fork.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
+        with:
+          languages: go
+      - uses: github/codeql-action/autobuild@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
+      - uses: github/codeql-action/analyze@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
