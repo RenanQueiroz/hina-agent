@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,13 +36,39 @@ type Server struct {
 	log      *slog.Logger
 	ready    atomic.Bool
 	handler  http.Handler
+
+	turnMu      sync.Mutex      // guards activeTurns
+	activeTurns map[string]bool // conversationID -> a turn is in flight
 }
 
 // New builds the server and its handler.
 func New(cfg config.Config, st *store.Store, bus *events.Bus, am *auth.Manager, provider llm.Provider, logs *logbuf.Buffer, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, bus: bus, auth: am, provider: provider, logs: logs, log: log}
+	s := &Server{cfg: cfg, store: st, bus: bus, auth: am, provider: provider, logs: logs, log: log, activeTurns: make(map[string]bool)}
 	s.handler = s.withMiddleware(s.routes())
 	return s
+}
+
+// beginTurn marks a conversation as having an in-flight turn, returning false if
+// one is already active. This serializes turns per conversation so concurrent or
+// retried POSTs (multiple tabs, API clients, retries) can't interleave and
+// corrupt the durable turn order or the context BuildContext sees. It is
+// in-memory (single-process, matching the current deployment); a DB-backed lease
+// is the upgrade path if the control plane ever runs multi-process.
+func (s *Server) beginTurn(conversationID string) bool {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if s.activeTurns[conversationID] {
+		return false
+	}
+	s.activeTurns[conversationID] = true
+	return true
+}
+
+// endTurn clears the in-flight marker for a conversation.
+func (s *Server) endTurn(conversationID string) {
+	s.turnMu.Lock()
+	delete(s.activeTurns, conversationID)
+	s.turnMu.Unlock()
 }
 
 // Handler returns the configured HTTP handler.

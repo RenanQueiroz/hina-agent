@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/config"
@@ -251,6 +252,201 @@ func TestChangePasswordRevokesSessions(t *testing.T) {
 	// The reissued session (in the jar) still works.
 	if got := getStatus(t, client, ts.URL+"/api/v1/auth/me"); got != http.StatusOK {
 		t.Fatalf("reissued session /me = %d, want 200", got)
+	}
+}
+
+// TestErroredTurnReplayParity proves that on a mid-stream failure the durable
+// ErrorEvent carries the same partial text as the assistant turn's canonical
+// text, so a reload (which replays from events) reconstructs exactly what
+// BuildContext feeds the model — no hidden, un-inspectable context.
+func TestErroredTurnReplayParity(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	srv := New(
+		config.Default(), st, events.NewBus(st), auth.NewManager(st, false),
+		errAfterDeltaProvider{}, logbuf.New(50),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	srv.SetReady(true)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	boot, _ := auth.EnsureAdmin(ctx, st)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	postJSON(t, client, ts.URL+"/api/v1/auth/login",
+		map[string]string{"username": "admin", "password": boot.Password}, nil)
+	var conv struct {
+		ID string `json:"id"`
+	}
+	postJSON(t, client, ts.URL+"/api/v1/conversations", map[string]string{}, &conv)
+
+	body, _ := json.Marshal(map[string]string{"text": "hi"})
+	resp, err := client.Post(ts.URL+"/api/v1/conversations/"+conv.ID+"/messages",
+		"application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("errored message = %d, want 502", resp.StatusCode)
+	}
+
+	// Canonical text fed to BuildContext for the failed assistant turn.
+	turns, _ := st.ListTurns(ctx, conv.ID)
+	var canonical string
+	var sawAssistant bool
+	for _, tn := range turns {
+		if tn.Role == "assistant" {
+			canonical = tn.CanonicalText
+			sawAssistant = true
+		}
+	}
+	if !sawAssistant {
+		t.Fatal("expected a persisted (partial) assistant turn")
+	}
+
+	// The durable ErrorEvent must carry the same text, so replay matches context.
+	evs, _ := st.ListEventsSince(ctx, conv.ID, 0)
+	var errText string
+	var foundErr bool
+	for _, e := range evs {
+		if e.Type == events.TypeError {
+			var p struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal([]byte(e.Payload), &p); err != nil {
+				t.Fatalf("decode error payload: %v", err)
+			}
+			errText, foundErr = p.Text, true
+		}
+	}
+	if !foundErr {
+		t.Fatal("expected a durable ErrorEvent")
+	}
+	if errText != canonical || canonical == "" {
+		t.Fatalf("ErrorEvent text %q != canonical %q — replay would diverge from model context", errText, canonical)
+	}
+}
+
+// blockingProvider streams nothing until release is closed, so a turn can be
+// held in flight while the test issues a second concurrent POST.
+type blockingProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingProvider) Name() string { return "blocking" }
+
+func (b *blockingProvider) Stream(ctx context.Context, _ llm.Request) (<-chan llm.Delta, error) {
+	ch := make(chan llm.Delta)
+	go func() {
+		defer close(ch)
+		close(b.started)
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			return
+		}
+		ch <- llm.Delta{Text: "ok"}
+		ch <- llm.Delta{Done: true}
+	}()
+	return ch, nil
+}
+
+// TestConcurrentPostReturns409 proves turns are serialized per conversation: a
+// second POST while one is in flight is rejected with 409, so interleaved turns
+// can't corrupt the durable order or the model context.
+func TestConcurrentPostReturns409(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	prov := &blockingProvider{started: make(chan struct{}), release: make(chan struct{})}
+	srv := New(
+		config.Default(), st, events.NewBus(st), auth.NewManager(st, false),
+		prov, logbuf.New(50),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	srv.SetReady(true)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	boot, _ := auth.EnsureAdmin(ctx, st)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	postJSON(t, client, ts.URL+"/api/v1/auth/login",
+		map[string]string{"username": "admin", "password": boot.Password}, nil)
+	var conv struct {
+		ID string `json:"id"`
+	}
+	postJSON(t, client, ts.URL+"/api/v1/conversations", map[string]string{}, &conv)
+
+	msgURL := ts.URL + "/api/v1/conversations/" + conv.ID + "/messages"
+
+	// POST #1 blocks in the provider, holding the conversation's turn.
+	done := make(chan int, 1)
+	go func() {
+		b, _ := json.Marshal(map[string]string{"text": "first"})
+		resp, err := client.Post(msgURL, "application/json", strings.NewReader(string(b)))
+		if err != nil {
+			done <- -1
+			return
+		}
+		_ = resp.Body.Close()
+		done <- resp.StatusCode
+	}()
+
+	select {
+	case <-prov.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first turn never started")
+	}
+
+	// POST #2 to the same conversation, concurrent with #1, must be rejected.
+	b2, _ := json.Marshal(map[string]string{"text": "second"})
+	resp2, err := client.Post(msgURL, "application/json", strings.NewReader(string(b2)))
+	if err != nil {
+		t.Fatalf("second post: %v", err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusConflict {
+		t.Fatalf("concurrent POST = %d, want 409", resp2.StatusCode)
+	}
+
+	// Release #1; it completes successfully and frees the turn.
+	close(prov.release)
+	select {
+	case code := <-done:
+		if code != http.StatusOK {
+			t.Fatalf("first POST = %d, want 200", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("first POST never completed")
+	}
+
+	// Exactly one user turn ("first") was persisted — the rejected POST added none.
+	turns, _ := st.ListTurns(ctx, conv.ID)
+	users := 0
+	for _, tn := range turns {
+		if tn.Role == "user" {
+			users++
+		}
+	}
+	if users != 1 {
+		t.Fatalf("user turns = %d, want 1 (rejected POST must not persist a turn)", users)
 	}
 }
 

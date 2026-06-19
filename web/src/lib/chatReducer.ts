@@ -51,9 +51,16 @@ export function reduceEvent(prev: Msg[], e: ServerEvent): Msg[] {
         streaming: false,
         interrupted: Boolean(p.interrupted),
       });
-    case TypeError:
-      // Mark the (possibly partial) assistant turn as errored; keep any text.
-      return upsert(prev, turnId, { role: "assistant", streaming: false, error: true });
+    case TypeError: {
+      // Mark the (possibly partial) assistant turn as errored. Live streaming
+      // already accumulated the text from deltas; on replay there are no deltas,
+      // so restore the partial text the server persisted in the event payload —
+      // this keeps replayed UI history in parity with the canonical text the
+      // server feeds the model.
+      const patch: Partial<Msg> & { role: string } = { role: "assistant", streaming: false, error: true };
+      if (typeof p.text === "string" && p.text !== "") patch.text = p.text;
+      return upsert(prev, turnId, patch);
+    }
     default:
       return prev;
   }

@@ -60,6 +60,15 @@ describe("reduceEvent", () => {
     expect(s[0].streaming).toBe(false);
   });
 
+  it("restores partial text on replay from the ErrorEvent payload", () => {
+    // Replay has no live deltas, so the partial text must come from the event
+    // payload — matching the canonical text the server feeds the model.
+    const s = reduceEvent([], ev(TypeError, "t6", { error: "boom", text: "partial reply" }));
+    expect(s[0].text).toBe("partial reply");
+    expect(s[0].error).toBe(true);
+    expect(s[0].streaming).toBe(false);
+  });
+
   it("ignores events without a turn id", () => {
     const s = reduceEvent([], ev("SessionCreated", "", { title: "x" }));
     expect(s).toEqual([]);

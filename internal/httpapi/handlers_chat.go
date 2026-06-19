@@ -97,6 +97,17 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "text is required")
 		return
 	}
+
+	// Serialize turns per conversation: reject a second concurrent POST so
+	// interleaved turns can't corrupt the durable order or the context the model
+	// sees. The composer disables Send while pending; this also guards other
+	// tabs, API clients, and retries.
+	if !s.beginTurn(conv.ID) {
+		writeErr(w, http.StatusConflict, "a turn is already in progress for this conversation")
+		return
+	}
+	defer s.endTurn(conv.ID)
+
 	ctx := r.Context()
 
 	// 1. Persist the user turn together with its UserTextSubmitted event
@@ -161,8 +172,12 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			ID: asTurnID, ConversationID: conv.ID, Role: "assistant", Mode: "text",
 			CanonicalText: text, Metadata: `{"error":true}`,
 		}
+		// Carry the partial canonical text in the durable ErrorEvent so a reload
+		// replays exactly what BuildContext will feed the model (the live-only
+		// AgentTextDelta events aren't replayed). Keeps UI history and model
+		// context in parity for failed turns.
 		errEvt := s.newEvent(events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
-			map[string]string{"error": streamErr.Error()})
+			map[string]any{"error": streamErr.Error(), "text": text})
 		commitEvt := s.newEvent(events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil)
 		if _, err := s.bus.PublishTurn(context.Background(), assistantTurn, errEvt, commitEvt); err != nil {
 			s.log.Error("persist failed assistant turn", "err", err)
