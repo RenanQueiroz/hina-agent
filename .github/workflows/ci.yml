@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The control plane is CGo-free on purpose, so the Windows/macOS jobs need no
+# C toolchain. Local ONNX adapters (later phases) will add a CGo build behind a
+# build tag with its own job.
+env:
+  CGO_ENABLED: "0"
+
+jobs:
+  build-test:
+    name: build & test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Doctor smoke (non-interactive)
+        run: go run ./cmd/hina doctor --json
+
+  cross-compile:
+    name: cross-compile targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Cross-compile all Tier-1 targets
+        shell: bash
+        run: |
+          set -e
+          for t in windows/amd64 darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            GOOS=${t%/*} GOARCH=${t#*/} go build -o /dev/null ./cmd/hina && echo "$t OK"
+          done

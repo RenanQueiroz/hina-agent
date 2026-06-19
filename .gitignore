@@ -1,0 +1,13 @@
+# Build output
+/bin/
+/hina
+/hina.exe
+*.test
+*.out
+
+# App-managed runtime/state created during local runs
+/.localstate/
+
+# Editor / OS cruft
+.DS_Store
+*.swp
