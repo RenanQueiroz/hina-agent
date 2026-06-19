@@ -140,10 +140,28 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	interrupted := ctx.Err() != nil
 
-	// 4. Persist the assistant turn + checkpoints with a fresh context so a
-	//    client disconnect still records what was generated.
+	// 4. Finalize, using a fresh context so a client disconnect still records
+	//    what was generated.
 	pctx := context.Background()
 	text := sb.String()
+
+	// A real mid-stream failure (not a client-initiated interrupt) is NOT a
+	// successful turn: record the partial as errored, emit ErrorEvent, close the
+	// turn, and return 502 — never AgentTextCompleted.
+	if streamErr != nil && !interrupted {
+		if err := s.store.AppendTurn(pctx, store.Turn{
+			ID: asTurnID, ConversationID: conv.ID, Role: "assistant", Mode: "text",
+			CanonicalText: text, Metadata: `{"error":true}`,
+		}); err != nil {
+			s.log.Error("persist failed assistant turn", "err", err)
+		}
+		s.publish(pctx, events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
+			map[string]string{"error": streamErr.Error()})
+		s.publish(pctx, events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil)
+		writeErr(w, http.StatusBadGateway, "llm stream error")
+		return
+	}
+
 	meta := "{}"
 	if interrupted {
 		meta = `{"interrupted":true}`
@@ -153,10 +171,6 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		CanonicalText: text, Metadata: meta,
 	}); err != nil {
 		s.log.Error("persist assistant turn", "err", err)
-	}
-	if streamErr != nil && !interrupted {
-		s.publish(pctx, events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
-			map[string]string{"error": streamErr.Error()})
 	}
 	s.publish(pctx, events.SourceServer, events.TypeAgentTextCompleted, conv.ID, u.ID, asTurnID,
 		map[string]any{"text": text, "interrupted": interrupted})

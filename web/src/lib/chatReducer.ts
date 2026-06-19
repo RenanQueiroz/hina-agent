@@ -6,6 +6,7 @@ import type { Event as ServerEvent } from "./events.gen";
 import {
   TypeAgentTextCompleted,
   TypeAgentTextDelta,
+  TypeError,
   TypeUserTextSubmitted,
 } from "./events.gen";
 
@@ -15,6 +16,7 @@ export interface Msg {
   text: string;
   streaming?: boolean;
   interrupted?: boolean;
+  error?: boolean;
 }
 
 function upsert(prev: Msg[], id: string, patch: Partial<Msg> & { role: string }): Msg[] {
@@ -49,6 +51,9 @@ export function reduceEvent(prev: Msg[], e: ServerEvent): Msg[] {
         streaming: false,
         interrupted: Boolean(p.interrupted),
       });
+    case TypeError:
+      // Mark the (possibly partial) assistant turn as errored; keep any text.
+      return upsert(prev, turnId, { role: "assistant", streaming: false, error: true });
     default:
       return prev;
   }

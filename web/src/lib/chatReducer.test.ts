@@ -4,6 +4,7 @@ import type { Event as ServerEvent } from "./events.gen";
 import {
   TypeAgentTextCompleted,
   TypeAgentTextDelta,
+  TypeError,
   TypeUserTextSubmitted,
 } from "./events.gen";
 
@@ -48,6 +49,15 @@ describe("reduceEvent", () => {
   it("marks interrupted replies", () => {
     const s = reduceEvent([], ev(TypeAgentTextCompleted, "t4", { text: "part", interrupted: true }));
     expect(s[0].interrupted).toBe(true);
+  });
+
+  it("marks a turn errored on ErrorEvent, keeping partial text", () => {
+    let s: Msg[] = [];
+    s = reduceEvent(s, ev(TypeAgentTextDelta, "t5", { delta: "partial" }));
+    s = reduceEvent(s, ev(TypeError, "t5", { error: "boom" }));
+    expect(s[0].text).toBe("partial");
+    expect(s[0].error).toBe(true);
+    expect(s[0].streaming).toBe(false);
   });
 
   it("ignores events without a turn id", () => {

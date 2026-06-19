@@ -167,6 +167,7 @@ function MessageBubble({ msg }: { msg: Msg }) {
         {msg.interrupted && (
           <span className="ml-2 text-xs italic opacity-70">[interrupted]</span>
         )}
+        {msg.error && <span className="ml-2 text-xs italic text-red-400">[failed]</span>}
         {!isUser && msg.text && (
           <button
             onClick={() => navigator.clipboard?.writeText(msg.text)}

@@ -10,7 +10,11 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: "http://127.0.0.1:8733",
-        changeOrigin: true,
+        // Keep the original Host header (changeOrigin would rewrite it to the
+        // backend while the browser's Origin stays :5173, tripping the
+        // server's same-origin CSRF check). Reverse proxies in production must
+        // likewise preserve Host.
+        changeOrigin: false,
       },
     },
   },

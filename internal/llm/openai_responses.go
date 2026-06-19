@@ -21,10 +21,22 @@ type OpenAIResponsesProvider struct {
 
 // NewOpenAIResponsesProvider builds the provider. baseURL is optional (defaults
 // to the OpenAI API) and lets it target a /responses-compatible endpoint.
+//
+// The SDK reads OPENAI_* env vars by default, so we defend against the V1
+// footguns: always pin the base URL (a stray OPENAI_BASE_URL can't redirect
+// cloud traffic), only set the API key when configured (an empty config key
+// must not clobber a real OPENAI_API_KEY), and strip org/project headers.
 func NewOpenAIResponsesProvider(apiKey, model, baseURL string) *OpenAIResponsesProvider {
-	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
-	if baseURL != "" {
-		opts = append(opts, option.WithBaseURL(baseURL))
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+	opts := []option.RequestOption{
+		option.WithBaseURL(baseURL),
+		option.WithHeaderDel("OpenAI-Organization"),
+		option.WithHeaderDel("OpenAI-Project"),
+	}
+	if apiKey != "" {
+		opts = append(opts, option.WithAPIKey(apiKey))
 	}
 	return &OpenAIResponsesProvider{client: openai.NewClient(opts...), model: model}
 }

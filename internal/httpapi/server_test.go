@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -103,6 +104,109 @@ func TestServerIntegration(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("cross-origin POST = %d, want 403", resp.StatusCode)
+	}
+}
+
+// errAfterDeltaProvider streams one delta then fails, simulating a real
+// mid-stream backend error (not a client interrupt).
+type errAfterDeltaProvider struct{}
+
+func (errAfterDeltaProvider) Name() string { return "err" }
+
+func (errAfterDeltaProvider) Stream(_ context.Context, _ llm.Request) (<-chan llm.Delta, error) {
+	ch := make(chan llm.Delta)
+	go func() {
+		defer close(ch)
+		ch <- llm.Delta{Text: "partial "}
+		ch <- llm.Delta{Err: errors.New("backend boom")}
+	}()
+	return ch, nil
+}
+
+func TestStreamErrorReturns502(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	srv := New(
+		config.Default(), st, events.NewBus(st), auth.NewManager(st, false),
+		errAfterDeltaProvider{}, logbuf.New(50),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	srv.SetReady(true)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	boot, _ := auth.EnsureAdmin(ctx, st)
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	postJSON(t, client, ts.URL+"/api/v1/auth/login",
+		map[string]string{"username": "admin", "password": boot.Password}, nil)
+	var conv struct {
+		ID string `json:"id"`
+	}
+	postJSON(t, client, ts.URL+"/api/v1/conversations", map[string]string{}, &conv)
+
+	// The message stream errors mid-way -> 502, not a 200 "completed" turn.
+	body, _ := json.Marshal(map[string]string{"text": "hi"})
+	resp, err := client.Post(ts.URL+"/api/v1/conversations/"+conv.ID+"/messages",
+		"application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("message on stream error = %d, want 502", resp.StatusCode)
+	}
+
+	evs, err := st.ListEventsSince(ctx, conv.ID, 0)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	var hasError, hasCompleted bool
+	for _, e := range evs {
+		switch e.Type {
+		case events.TypeError:
+			hasError = true
+		case events.TypeAgentTextCompleted:
+			hasCompleted = true
+		}
+	}
+	if !hasError {
+		t.Error("expected an ErrorEvent")
+	}
+	if hasCompleted {
+		t.Error("must not emit AgentTextCompleted on a stream error")
+	}
+}
+
+func TestSameOrigin(t *testing.T) {
+	mk := func(origin, host string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "http://"+host+"/api/v1/x", nil)
+		r.Host = host
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		return r
+	}
+	cases := []struct {
+		origin, host string
+		want         bool
+	}{
+		{"http://127.0.0.1:5173", "127.0.0.1:5173", true}, // dev proxy (Host preserved)
+		{"http://hina.example", "hina.example", true},     // prod same-origin
+		{"http://evil.example", "hina.example", false},    // cross-site forged POST
+		{"", "hina.example", true},                        // non-browser client (no cookie CSRF)
+	}
+	for _, c := range cases {
+		if got := sameOrigin(mk(c.origin, c.host)); got != c.want {
+			t.Errorf("sameOrigin(origin=%q host=%q) = %v, want %v", c.origin, c.host, got, c.want)
+		}
 	}
 }
 
