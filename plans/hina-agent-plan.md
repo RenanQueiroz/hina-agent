@@ -1,7 +1,7 @@
 # Phase 2 Plan: V2 Realtime Voice Architecture
 
 Date: 2026-06-13
-Updated: 2026-06-18
+Updated: 2026-06-19
 
 ## Goal
 
@@ -19,11 +19,44 @@ Design and build a v2 voice-agent architecture that feels like talking to a pers
 - first-class native host support for Windows, macOS, and Linux in V2.
 
 V1 is considered complete after the ONNX ASR / Parakeet work. Freeze the current
-Python/Textual app as the v1 reference implementation. V2 should be a rewrite,
-possibly in a new repo, not an incremental patch to the current `VoicePipeline`
-loop.
+Python/Textual app as the v1 reference implementation. The V1 checkout is
+`/home/renan/voice-agent`. This plan currently lives in
+`/home/renan/hina-agent`; treat that as the intended V2 implementation workspace
+unless the user explicitly redirects. V2 should be a rewrite, not an incremental
+patch to the current `VoicePipeline` loop. Do not patch V1 except to tag,
+freeze, or document it.
 
 ## Source Notes
+
+V1 reference implementation:
+
+- Reference checkout: `/home/renan/voice-agent`.
+- `README.md`: current feature matrix, setup flow, config files, supported
+  local/cloud runtime combinations, and the fact that Windows support is WSL2
+  only in V1.
+- `voice-agent/app.py`: Textual app lifecycle, pipeline worker startup, model
+  switching, interrupt/mute/reset controls, and shell-approval UI behavior.
+- `voice-agent/pipeline.py`: current turn loop around the OpenAI Agents
+  `VoicePipeline`; this is the clearest source for why V2 is a rewrite. V1
+  records one segment, mutes capture while responding, cancels on manual
+  interrupt, and saves partial assistant history.
+- `voice-agent/audio.py`: `sounddevice` capture/playback, Silero VAD chunking,
+  pre-roll/silence thresholds, and interruption-sensitive PortAudio behavior.
+- `voice-agent/providers.py`: current OpenAI Agents SDK adapter, local/cloud
+  provider glue, streaming TTS behavior, metrics, tool handling, and audio
+  cleanup details.
+- `voice-agent/runtimes.py` and `voice-agent/servers.py`: runtime registry,
+  OS filtering, readiness checks, process startup/logging, llama.cpp idle
+  unload, and orphan-process cleanup. Port the concepts, not the Python process
+  plumbing.
+- `config.toml`, `models.toml`, `preferences.toml.example`,
+  `mcp_servers.toml.example`, and `llamacpp-models.ini.example`: config
+  semantics to preserve or deliberately replace.
+
+Use V1 as a behavior reference and migration corpus, not as V2 architecture.
+The key break is that V1 is terminal-first, effectively single-user, and mutes
+the recorder during assistant speech; V2 is server-first, web-first,
+authenticated, sandboxed, and must keep listening while the assistant speaks.
 
 NVIDIA NeMo voice-agent example:
 
@@ -1344,9 +1377,14 @@ For user secrets:
 
 ## Migration Strategy
 
-Freeze V1 and build V2 deliberately. If V2 lives in this repo, keep the V1 app
-runnable until V2 reaches feature parity for the target workflows. A new repo is
-also acceptable.
+Freeze V1 and build V2 deliberately. V1 lives at `/home/renan/voice-agent` and
+should remain runnable or be clearly tagged/frozen before V2 work invalidates
+any assumptions. V2 work should happen in `/home/renan/hina-agent` unless the
+user explicitly redirects.
+
+Before step 1, close the "Clarify before first code" items in the
+Implementation Readiness Review so the first scaffold does not bake in the
+wrong names, auth model, database shape, or event contracts.
 
 Recommended V2 sequence:
 
@@ -1475,6 +1513,71 @@ Run the benchmark harness against:
 - Windows native runtime setup: `sbx` smoke, llama.cpp install/launch, ORT DLL
   load, process cleanup, and secret-vault unlock.
 
+## Implementation Readiness Review
+
+The plan is ready to start a narrow bootstrap only after the first-code
+clarifications below are closed. Do not wait for every local-voice,
+Windows-runtime, or Automation spike before creating the initial server, config,
+auth/session, migration, event, and web-app skeleton. Those deeper features
+remain gated by their own spikes.
+
+Clarify before first code:
+
+- Repository/product identity: use `/home/renan/hina-agent` as the V2 workspace
+  and choose the Go module path, binary name, config directory name, service
+  name, and user-facing product name. Treat `voice-agent` references as V1-only
+  unless intentionally describing migration.
+- Bootstrap auth/session v0: define the first-run admin credential flow, password
+  hashing, secure cookie or bearer-token session storage, admin/user roles,
+  local-only defaults, and LAN enablement gates before building user/admin
+  routes.
+- Persistence schema v0: choose the SQLite driver/migration tool and sketch the
+  initial table boundaries for users, sessions, turns, events, runtime state,
+  Automation definitions/runs/artifacts, sandbox state, secret metadata, and
+  agent-auth state. Avoid letting early UI routes invent ad hoc JSON blobs that
+  later fight the event model.
+- Event/API wire contracts v0: decide HTTP route shape, user/admin event stream
+  transport, event replay/reconnect behavior, `RTCDataChannel` event envelope,
+  versioning, and generated TypeScript types before the frontend and backend
+  drift.
+- Tier 1 validation hosts: confirm access to native Windows 11 x64, macOS Apple
+  Silicon, and Linux x86_64. If one is unavailable, mark that platform as
+  planned but unvalidated in docs and setup output.
+
+Research or spike before dependent feature work:
+
+- WebRTC media bridge: Pion can own the WebRTC transport, but local ASR/TTS need
+  PCM frames while browser WebRTC normally carries Opus RTP. Decide and measure
+  the Opus decode path for microphone input, the Opus encode path for assistant
+  audio output, resampling between 48 kHz WebRTC audio and 16/44.1 kHz model
+  contracts, packet-loss behavior, latency, and CGo/build implications.
+- Docker `sbx` production fit: re-verify current install, authentication,
+  kits/templates, policy, secrets, `--clone`, workspace mounts, `sbx cp`,
+  `host.docker.internal`, and Windows behavior before building the sandbox
+  runner around undocumented assumptions.
+- Drift-prone CLI adapters: re-verify Codex, Claude Code, Cursor, and Pi flags,
+  auth flows, stream formats, structured-output modes, cancellation behavior,
+  and version reporting immediately before implementing each adapter. Treat
+  them as versioned capabilities discovered by health checks.
+- Model asset licensing and distribution: confirm the licenses, download terms,
+  checksum sources, cache layout, and redistribution constraints for Nemotron,
+  the ONNX community exports, Supertonic 3, Silero VAD, and llama.cpp release
+  assets before shipping managed installers.
+- ONNX Runtime Go binding: choose the binding, version pin, build tags, runtime
+  library/DLL discovery, execution provider, and Windows packaging strategy
+  before committing local ASR/TTS code to a specific adapter API.
+- OpenAI Realtime integration: refresh official docs for the unified SDP flow,
+  ephemeral secrets, sideband/server controls, tool-call handling, cancellation,
+  and transcript capture before implementing full-cloud Realtime mode.
+- Automation semantics: define selector/template syntax, retry/error policy,
+  idempotency expectations, artifact promotion rules, notification/output
+  side-effect confirmation, and schema evolution before promising portable
+  `automation.v1` imports.
+- Secret-vault threat model: explicitly document that unattended Automations
+  require server-side decryptability, so secrets can be hidden from the database
+  and normal admin UI but not from a malicious host/root admin or modified
+  server binary.
+
 ## Major Risks
 
 - Echo cancellation remains hard even with browser/WebRTC; AEC reduces the problem but does not remove the need for playback-aware turn detection.
@@ -1530,6 +1633,8 @@ Run the benchmark harness against:
   because the sandbox/runtime stack must be validated there separately.
 - Do not embed Python in the main server as the default. Use non-Go workers only as explicitly justified exceptions.
 - Drop Textual/TUI from V2. V1 remains the terminal-first app.
+- `/home/renan/voice-agent` is the V1 reference corpus. `/home/renan/hina-agent`
+  is the intended V2 workspace unless the user explicitly redirects.
 - Serve both a user Web UI and an admin Web UI.
 - Web UI is enabled on localhost by default. LAN binding is explicit.
 - LAN access always requires authentication; do not trust the local network after first pairing.
@@ -1608,10 +1713,16 @@ Run the benchmark harness against:
 - Build Windows path/permission fixtures for workspace roots, long paths,
   drive-letter paths, case collisions, symlinks/reparse points, ACL failures,
   CRLF logs, and sandbox mount translation.
-- Build a small Go WebRTC audio loopback prototype with browser capture/playback progress and data-channel events.
+- Build a small Go WebRTC audio loopback prototype with browser
+  capture/playback progress, data-channel events, Opus RTP decode to PCM input,
+  PCM-to-Opus output, model-rate resampling, latency metrics, and
+  CGo/build-tag implications.
 - Build the typed chat path and shared session-context builder before live-mode context handoff.
 - Scaffold the React/Vite frontend stack with shadcn/ui Base UI components, Tailwind CSS, TanStack Router/Query/Table, Zustand UI preference store, React Hook Form, Zod, Ajv, and Playwright/Vitest test wiring.
 - Implement `automation.v1` as JSON Schema and build import/export validation around it.
+- Define `automation.v1` selector/template syntax, retry/error policy,
+  idempotency expectations, side-effect confirmation rules, artifact promotion,
+  and schema evolution before relying on portable imports.
 - Build the first guided Automation builder UI that emits `automation.v1` JSON, validates through frontend Ajv plus backend schema validation, and reserves CodeMirror for generated preview/import repair only.
 - Build a durable SQLite-backed scheduler with server-up-only execution semantics.
 - Build the per-user secret vault and sandbox secret injection path.
@@ -1619,11 +1730,20 @@ Run the benchmark harness against:
 - Build the Sandbox Environment settings UI/API and per-user persistent sandbox state layout.
 - Build the agent auth broker: PTY-based login runner, URL/code detection, frontend handoff, status checks, logout, and encrypted per-user agent state persistence.
 - Build the typed GitHub review-request Automation path: notifications query, PR checkout, no-op skip, optional PR comment output.
+- Re-verify current Codex, Claude Code, Cursor, and Pi CLI/auth/output/cancel
+  behavior before freezing adapter contracts.
 - Wrap Codex, Claude Code, and Cursor CLI in versioned adapters with health checks, structured output parsing, cancellation, timeout, artifact capture, and normalized `AgentRunResult`.
 - Build the Pi local-only adapter: generated Pi config pointing at host llama.cpp, `pi --mode rpc` event handling, cancellation, structured-output validation/retry, artifact capture, and normalized `AgentRunResult`.
 - Validate Docker `sbx` policy and secret primitives against the product requirements, including per-user/sandbox-scoped service-secret injection through `sbx secret`, unsupported/custom secret fallback injection from the app vault, and log/artifact redaction.
 - Build cloud provider adapter spikes using the official OpenAI Go SDK for OpenAI Responses/Realtime-related server paths and the Google Gen AI Go SDK for Gemini-native cloud model paths.
+- Refresh OpenAI Realtime docs immediately before implementation and verify the
+  unified SDP flow, ephemeral secrets, sideband/server controls, cancellation,
+  tool-call handling, and transcript capture against the chosen Go/browser
+  client path.
 - Optionally expose the agent adapters through an MCP server facade so MCP-capable LLMs can call them as tools while Go still owns process invocation.
+- Confirm model/runtime asset licenses, download terms, checksums, cache layout,
+  and redistribution constraints for Nemotron, ONNX exports, Supertonic 3,
+  Silero VAD, llama.cpp release assets, and any bundled tokenizer/config files.
 - Build a native Go Supertonic 3 synthesis spike using ONNX Runtime and measure cold start, warm synthesis latency, CPU, and memory.
 - Build a native Go Nemotron 3.5 streaming ASR spike using ONNX Runtime / ONNX Runtime GenAI assets and measure partial cadence, final latency, CPU, and memory.
 - Add decoder-side context biasing (shallow-fusion token-level boosting trie over the SentencePiece tokenizer) to the Go Nemotron decoder so the configurable agent name (default `Hina`) is reliably transcribed. Build the trie at runtime from `[agent].name` + `name_aliases`, start from NeMo's RNNT params (`context_score ≈ 1.0`, `depth_scaling ≈ 2.0`), pair it with detect-and-strip wake-token routing, and fixture-test substitution rate with biasing off vs on across candidate names.
