@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 
 	"github.com/BurntSushi/toml"
@@ -16,7 +17,20 @@ import (
 type Config struct {
 	Server ServerConfig `toml:"server"`
 	Agent  AgentConfig  `toml:"agent"`
+	LLM    LLMConfig    `toml:"llm"`
 	Log    LogConfig    `toml:"log"`
+}
+
+// LLMConfig selects the active text LLM backend. Admin-owned; users do not pick
+// STT/LLM/TTS. provider "mock" needs no credentials; "openai" targets any
+// OpenAI-compatible endpoint (cloud OpenAI by default, or a local llama.cpp
+// server via base_url).
+type LLMConfig struct {
+	Provider     string `toml:"provider"`      // mock | openai (default mock)
+	Model        string `toml:"model"`         // e.g. gpt-5.4-mini, or a local model id
+	BaseURL      string `toml:"base_url"`      // e.g. http://localhost:8080/v1 for llama.cpp
+	APIKey       string `toml:"api_key"`       // literal or ${ENV_VAR}
+	SystemPrompt string `toml:"system_prompt"` // system message prepended to context
 }
 
 // ServerConfig controls binding and TLS.
@@ -45,6 +59,7 @@ func Default() Config {
 	return Config{
 		Server: ServerConfig{Host: "127.0.0.1", Port: 8733},
 		Agent:  AgentConfig{Name: "Hina"},
+		LLM:    LLMConfig{Provider: "mock", SystemPrompt: "You are Hina, a helpful, concise assistant."},
 		Log:    LogConfig{Level: "info", Format: "text"},
 	}
 }
@@ -90,6 +105,29 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("HINA_LOG_FORMAT"); v != "" {
 		c.Log.Format = v
 	}
+	if v := os.Getenv("HINA_LLM_PROVIDER"); v != "" {
+		c.LLM.Provider = v
+	}
+	if v := os.Getenv("HINA_LLM_MODEL"); v != "" {
+		c.LLM.Model = v
+	}
+	if v := os.Getenv("HINA_LLM_BASE_URL"); v != "" {
+		c.LLM.BaseURL = v
+	}
+	if v := os.Getenv("HINA_LLM_API_KEY"); v != "" {
+		c.LLM.APIKey = v
+	}
+	// Expand ${VAR} references (e.g. api_key = "${OPENAI_API_KEY}").
+	c.LLM.APIKey = expandEnv(c.LLM.APIKey)
+}
+
+var envRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEnv replaces ${VAR} references with the environment value (empty if unset).
+func expandEnv(s string) string {
+	return envRefRe.ReplaceAllStringFunc(s, func(m string) string {
+		return os.Getenv(envRefRe.FindStringSubmatch(m)[1])
+	})
 }
 
 // Validate checks values and the LAN/loopback invariant.
@@ -115,6 +153,11 @@ func (c Config) Validate() error {
 	}
 	if c.Agent.Name == "" {
 		return fmt.Errorf("agent.name is empty")
+	}
+	switch c.LLM.Provider {
+	case "", "mock", "openai":
+	default:
+		return fmt.Errorf("llm.provider %q must be mock|openai", c.LLM.Provider)
 	}
 	return nil
 }

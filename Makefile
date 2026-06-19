@@ -8,7 +8,7 @@ GO       ?= go
 GOFLAGS  :=
 export CGO_ENABLED = 0
 
-.PHONY: all build test vet tidy run doctor cross clean
+.PHONY: all build test vet tidy run doctor cross clean gen-ts
 
 all: tidy vet test build
 
@@ -35,6 +35,10 @@ cross:
 	GOOS=windows GOARCH=amd64 $(GO) build -o /dev/null ./cmd/hina && echo "windows/amd64 OK"
 	GOOS=darwin  GOARCH=arm64 $(GO) build -o /dev/null ./cmd/hina && echo "darwin/arm64 OK"
 	GOOS=linux   GOARCH=amd64 $(GO) build -o /dev/null ./cmd/hina && echo "linux/amd64 OK"
+
+# Regenerate the TypeScript wire types from the Go DTOs (internal/wire, events).
+gen-ts:
+	$(GO) run github.com/gzuidhof/tygo@latest generate
 
 clean:
 	rm -rf bin

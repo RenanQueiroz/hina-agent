@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/RenanQueiroz/hina-agent/internal/id"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
@@ -62,6 +63,31 @@ func (b *Bus) Publish(ctx context.Context, e Event) (Event, error) {
 		}
 	}
 	return e, nil
+}
+
+// PublishEphemeral fans an event out to live subscribers WITHOUT persisting it
+// or assigning a seq (it keeps Seq=0). Used for high-frequency, replaceable
+// updates like streaming text deltas: the durable checkpoint (e.g. the
+// AgentTextCompleted event + the persisted turn) carries the canonical text, so
+// per-token rows are not written. Ephemeral events are not part of replay.
+func (b *Bus) PublishEphemeral(e Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if e.EventID == "" {
+		e.EventID = id.New("evt")
+	}
+	if e.ServerTS.IsZero() {
+		e.ServerTS = time.Now().UTC()
+	}
+	if len(e.Payload) == 0 {
+		e.Payload = []byte("{}")
+	}
+	for _, ch := range b.subs[e.ConversationID] {
+		select {
+		case ch <- e:
+		default:
+		}
+	}
 }
 
 // Subscribe returns a channel of events for a conversation plus a cancel func.

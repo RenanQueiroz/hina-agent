@@ -118,6 +118,16 @@ lan_enabled = false  # required (with a non-loopback host) to bind the LAN
 name = "Hina"
 name_aliases = []
 
+[llm]
+# Admin-owned text backend. "mock" needs no credentials; "openai" targets any
+# OpenAI-compatible endpoint (cloud OpenAI by default, or a local llama.cpp
+# server via base_url).
+provider = "mock"   # mock | openai
+# model = "gpt-5.4-mini"
+# base_url = "http://localhost:8080/v1"
+# api_key = "${OPENAI_API_KEY}"
+system_prompt = "You are Hina, a helpful, concise assistant."
+
 [log]
 level = "info"    # debug|info|warn|error
 format = "text"   # text|json

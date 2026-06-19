@@ -43,6 +43,31 @@ func (s *Store) GetUserByID(ctx context.Context, id string) (User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx, userSelect+` WHERE id=?`, id))
 }
 
+// ListUsers returns all users ordered by creation time.
+func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.db.QueryContext(ctx, userSelect+` ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []User
+	for rows.Next() {
+		var (
+			u                  User
+			mustChange         int
+			createdAt, updated string
+		)
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.PasswordHash, &u.Status, &mustChange, &createdAt, &updated); err != nil {
+			return nil, err
+		}
+		u.MustChangePassword = mustChange != 0
+		u.CreatedAt, _ = parseTime(createdAt)
+		u.UpdatedAt, _ = parseTime(updated)
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 // CountByRole returns the number of users with the given role.
 func (s *Store) CountByRole(ctx context.Context, role string) (int, error) {
 	var n int

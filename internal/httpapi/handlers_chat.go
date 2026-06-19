@@ -7,11 +7,15 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
+	"github.com/RenanQueiroz/hina-agent/internal/agent"
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/id"
+	"github.com/RenanQueiroz/hina-agent/internal/llm"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
+	"github.com/RenanQueiroz/hina-agent/internal/wire"
 )
 
 func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request) {
@@ -21,11 +25,11 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	out := make([]map[string]any, 0, len(convs))
+	out := make([]wire.Conversation, 0, len(convs))
 	for _, c := range convs {
 		out = append(out, conversationView(c))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"conversations": out})
+	writeJSON(w, http.StatusOK, wire.ConversationList{Conversations: out})
 }
 
 func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request) {
@@ -63,19 +67,19 @@ func (s *Server) handleListTurns(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	out := make([]map[string]any, 0, len(turns))
+	out := make([]wire.Turn, 0, len(turns))
 	for _, t := range turns {
-		out = append(out, map[string]any{
-			"id": t.ID, "role": t.Role, "mode": t.Mode,
-			"text": t.CanonicalText, "created_at": t.CreatedAt,
-		})
+		out = append(out, wire.Turn{ID: t.ID, Role: t.Role, Mode: t.Mode, Text: t.CanonicalText, CreatedAt: t.CreatedAt})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"turns": out})
+	writeJSON(w, http.StatusOK, wire.TurnList{Turns: out})
 }
 
-// handlePostMessage persists a user text turn and drives the event flow. The
-// LLM is wired in Phase 2; for now the assistant reply is a fixed placeholder so
-// the end-to-end persistence + event + SSE path is exercised.
+// handlePostMessage persists the user's text turn, then streams an assistant
+// reply from the configured LLM provider. Streaming is tied to the request
+// context: if the client aborts (stop/navigate away), the upstream LLM call is
+// cancelled and the partial reply is persisted with an interrupted marker. Text
+// deltas are ephemeral (live-only); the persisted turn + AgentTextCompleted
+// event carry the canonical text.
 func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	u, _ := auth.UserFrom(r.Context())
 	conv, ok := s.loadOwnedConversation(w, r)
@@ -85,12 +89,13 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Text string `json:"text"`
 	}
-	if err := decodeJSON(w, r, &body); err != nil || body.Text == "" {
+	if err := decodeJSON(w, r, &body); err != nil || strings.TrimSpace(body.Text) == "" {
 		writeErr(w, http.StatusBadRequest, "text is required")
 		return
 	}
-
 	ctx := r.Context()
+
+	// 1. Persist the user turn + checkpoint events.
 	userTurn := store.Turn{ID: id.New("trn"), ConversationID: conv.ID, Role: "user", Mode: "text", CanonicalText: body.Text}
 	if err := s.store.AppendTurn(ctx, userTurn); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
@@ -98,21 +103,73 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publish(ctx, events.SourceClient, events.TypeUserTextSubmitted, conv.ID, u.ID,
 		map[string]string{"turn_id": userTurn.ID, "text": body.Text})
-	s.publish(ctx, events.SourceServer, events.TypeTurnStarted, conv.ID, u.ID, nil)
 
-	const reply = "Text chat is wired end-to-end (persistence + events + SSE). The LLM lands in Phase 2."
-	s.publish(ctx, events.SourceServer, events.TypeAgentTextDelta, conv.ID, u.ID, map[string]string{"delta": reply})
-	asTurn := store.Turn{ID: id.New("trn"), ConversationID: conv.ID, Role: "assistant", Mode: "text", CanonicalText: reply}
-	if err := s.store.AppendTurn(ctx, asTurn); err != nil {
+	// 2. Build model context from the full canonical history (includes this turn).
+	turns, err := s.store.ListTurns(ctx, conv.ID)
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.publish(ctx, events.SourceServer, events.TypeAgentTextCompleted, conv.ID, u.ID, map[string]string{"turn_id": asTurn.ID})
-	s.publish(ctx, events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, nil)
+	msgs := agent.BuildContext(s.cfg.LLM.SystemPrompt, turns)
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user_turn_id":      userTurn.ID,
-		"assistant_turn_id": asTurn.ID,
+	// 3. Stream the assistant reply.
+	asTurnID := id.New("trn")
+	s.publish(ctx, events.SourceServer, events.TypeTurnStarted, conv.ID, u.ID, map[string]string{"turn_id": asTurnID})
+
+	stream, err := s.provider.Stream(ctx, llm.Request{Messages: msgs})
+	if err != nil {
+		s.publish(context.Background(), events.SourceServer, events.TypeError, conv.ID, u.ID,
+			map[string]string{"turn_id": asTurnID, "error": err.Error()})
+		writeErr(w, http.StatusBadGateway, "llm backend error")
+		return
+	}
+
+	var sb strings.Builder
+	var streamErr error
+	for d := range stream {
+		if d.Err != nil {
+			streamErr = d.Err
+			break
+		}
+		if d.Done {
+			break
+		}
+		sb.WriteString(d.Text)
+		s.publishEphemeral(events.SourceServer, events.TypeAgentTextDelta, conv.ID, u.ID,
+			map[string]string{"turn_id": asTurnID, "delta": d.Text})
+	}
+	interrupted := ctx.Err() != nil
+
+	// 4. Persist the assistant turn + checkpoints with a fresh context so a
+	//    client disconnect still records what was generated.
+	pctx := context.Background()
+	text := sb.String()
+	meta := "{}"
+	if interrupted {
+		meta = `{"interrupted":true}`
+	}
+	if err := s.store.AppendTurn(pctx, store.Turn{
+		ID: asTurnID, ConversationID: conv.ID, Role: "assistant", Mode: "text",
+		CanonicalText: text, Metadata: meta,
+	}); err != nil {
+		s.log.Error("persist assistant turn", "err", err)
+	}
+	if streamErr != nil && !interrupted {
+		s.publish(pctx, events.SourceServer, events.TypeError, conv.ID, u.ID,
+			map[string]string{"turn_id": asTurnID, "error": streamErr.Error()})
+	}
+	s.publish(pctx, events.SourceServer, events.TypeAgentTextCompleted, conv.ID, u.ID,
+		map[string]any{"turn_id": asTurnID, "text": text, "interrupted": interrupted})
+	s.publish(pctx, events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, map[string]string{"turn_id": asTurnID})
+
+	if interrupted {
+		return // client is gone; response write would fail
+	}
+	writeJSON(w, http.StatusOK, wire.PostMessageResponse{
+		UserTurnID:      userTurn.ID,
+		AssistantTurnID: asTurnID,
+		Text:            text,
+		Interrupted:     false,
 	})
 }
 
@@ -128,8 +185,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	// On reconnect, EventSource sends Last-Event-ID (the last persisted seq);
+	// honor it so the stream resumes without re-replaying. Fall back to ?since.
 	var since int64
-	if v := r.URL.Query().Get("since"); v != "" {
+	if v := r.Header.Get("Last-Event-ID"); v != "" {
+		since, _ = strconv.ParseInt(v, 10, 64)
+	} else if v := r.URL.Query().Get("since"); v != "" {
 		since, _ = strconv.ParseInt(v, 10, 64)
 	}
 
@@ -158,11 +219,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			if e.Seq <= lastSeq {
-				continue // already delivered via replay
+			// Persisted events (seq>0) dedup against replay; ephemeral deltas
+			// (seq==0) are always delivered live and never advance lastSeq.
+			if e.Seq > 0 && e.Seq <= lastSeq {
+				continue
 			}
 			writeSSE(w, e)
-			lastSeq = e.Seq
+			if e.Seq > lastSeq {
+				lastSeq = e.Seq
+			}
 			flusher.Flush()
 		}
 	}
@@ -173,7 +238,22 @@ func writeSSE(w http.ResponseWriter, e events.Event) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", e.Seq, e.Type, data)
+	// No `event:` line: all events use the default message event so the browser
+	// EventSource delivers them through one onmessage handler; the client reads
+	// the type from the JSON. id: (persisted seq only) drives reconnect resume.
+	if e.Seq > 0 {
+		fmt.Fprintf(w, "id: %d\n", e.Seq)
+	}
+	fmt.Fprintf(w, "data: %s\n\n", data)
+}
+
+func (s *Server) publishEphemeral(source, typ, convID, userID string, payload any) {
+	e, err := events.New(source, typ, convID, userID, payload)
+	if err != nil {
+		s.log.Error("build ephemeral event", "type", typ, "err", err)
+		return
+	}
+	s.bus.PublishEphemeral(e)
 }
 
 // loadOwnedConversation loads the conversation in the path and verifies the
@@ -207,9 +287,6 @@ func (s *Server) publish(ctx context.Context, source, typ, convID, userID string
 	}
 }
 
-func conversationView(c store.Conversation) map[string]any {
-	return map[string]any{
-		"id": c.ID, "title": c.Title,
-		"created_at": c.CreatedAt, "updated_at": c.UpdatedAt,
-	}
+func conversationView(c store.Conversation) wire.Conversation {
+	return wire.Conversation{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt}
 }

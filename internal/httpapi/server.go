@@ -15,23 +15,27 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/config"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/id"
+	"github.com/RenanQueiroz/hina-agent/internal/llm"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
+	"github.com/RenanQueiroz/hina-agent/internal/wire"
+	webui "github.com/RenanQueiroz/hina-agent/web"
 )
 
 // Server holds the HTTP dependencies and the built handler.
 type Server struct {
-	cfg     config.Config
-	store   *store.Store
-	bus     *events.Bus
-	auth    *auth.Manager
-	log     *slog.Logger
-	ready   atomic.Bool
-	handler http.Handler
+	cfg      config.Config
+	store    *store.Store
+	bus      *events.Bus
+	auth     *auth.Manager
+	provider llm.Provider
+	log      *slog.Logger
+	ready    atomic.Bool
+	handler  http.Handler
 }
 
 // New builds the server and its handler.
-func New(cfg config.Config, st *store.Store, bus *events.Bus, am *auth.Manager, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, bus: bus, auth: am, log: log}
+func New(cfg config.Config, st *store.Store, bus *events.Bus, am *auth.Manager, provider llm.Provider, log *slog.Logger) *Server {
+	s := &Server{cfg: cfg, store: st, bus: bus, auth: am, provider: provider, log: log}
 	s.handler = s.withMiddleware(s.routes())
 	return s
 }
@@ -48,7 +52,6 @@ func (s *Server) routes() http.Handler {
 	// Public.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 
 	// Authenticated user routes.
@@ -61,11 +64,25 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/conversations/{id}/turns", s.requireUser(s.handleListTurns))
 	mux.Handle("POST /api/v1/conversations/{id}/messages", s.requireUser(s.handlePostMessage))
 	mux.Handle("GET /api/v1/conversations/{id}/events", s.requireUser(s.handleEvents))
+	mux.Handle("GET /api/v1/config", s.requireUser(s.handleConfig))
 
 	// Admin routes.
 	mux.Handle("GET /api/v1/admin/users", s.requireAdmin(s.handleListUsers))
+	mux.Handle("GET /api/v1/admin/llm", s.requireAdmin(s.handleAdminLLM))
+	mux.Handle("GET /api/v1/admin/runtime", s.requireAdmin(s.handleAdminRuntime))
+
+	// SPA: the embedded web client serves all remaining paths (more specific
+	// /healthz, /readyz, /api/v1/* patterns take precedence).
+	mux.Handle("/", webui.Handler())
 
 	return mux
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, wire.ConfigInfo{
+		AgentName:   s.cfg.Agent.Name,
+		LLMProvider: s.provider.Name(),
+	})
 }
 
 func (s *Server) requireUser(h http.HandlerFunc) http.Handler  { return s.auth.RequireUser(h) }
@@ -83,13 +100,6 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-}
-
-func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>Hina</title>` +
-		`<h1>Hina</h1><p>Server is running. The web UI lands in Phase 2.</p>` +
-		`<p>Health: <a href="/healthz">/healthz</a> · <a href="/readyz">/readyz</a></p>`))
 }
 
 // --- middleware ---
@@ -157,14 +167,6 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
-// userView is the safe public projection of a user (no password hash).
-type userView struct {
-	ID                 string `json:"id"`
-	Username           string `json:"username"`
-	Role               string `json:"role"`
-	MustChangePassword bool   `json:"must_change_password"`
-}
-
-func toUserView(u store.User) userView {
-	return userView{ID: u.ID, Username: u.Username, Role: u.Role, MustChangePassword: u.MustChangePassword}
+func toUserView(u store.User) wire.User {
+	return wire.User{ID: u.ID, Username: u.Username, Role: u.Role, MustChangePassword: u.MustChangePassword}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/httpapi"
+	"github.com/RenanQueiroz/hina-agent/internal/llm"
 	"github.com/RenanQueiroz/hina-agent/internal/platform"
 )
 
@@ -62,9 +63,21 @@ func cmdServer(args []string) error {
 		}
 	}
 
+	provider, err := llm.Build(llm.Config{
+		Provider:     a.cfg.LLM.Provider,
+		Model:        a.cfg.LLM.Model,
+		BaseURL:      a.cfg.LLM.BaseURL,
+		APIKey:       a.cfg.LLM.APIKey,
+		SystemPrompt: a.cfg.LLM.SystemPrompt,
+	})
+	if err != nil {
+		return err
+	}
+	a.log.Info("llm provider", "provider", provider.Name(), "model", a.cfg.LLM.Model)
+
 	bus := events.NewBus(a.store)
 	am := auth.NewManager(a.store, a.cfg.Server.TLSEnabled())
-	srv := httpapi.New(a.cfg, a.store, bus, am, a.log)
+	srv := httpapi.New(a.cfg, a.store, bus, am, provider, a.log)
 	srv.SetReady(true)
 
 	httpSrv := &http.Server{

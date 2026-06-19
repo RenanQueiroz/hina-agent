@@ -1,0 +1,4 @@
+node_modules
+*.local
+.vite
+vite.config.ts.timestamp-*
