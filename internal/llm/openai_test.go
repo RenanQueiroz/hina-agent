@@ -100,3 +100,27 @@ func TestCompatErrorFrameErrors(t *testing.T) {
 		t.Fatal("error frame must not signal Done")
 	}
 }
+
+// TestCompatMalformedFrameThenDoneErrors proves a malformed data frame is a hard
+// error even when followed by [DONE] — it must never be skipped and then
+// "completed".
+func TestCompatMalformedFrameThenDoneErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, frame string
+	}{
+		{"not json", "data: not-json\n\n"},
+		{"error as string", `data: {"error":"boom"}` + "\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := sseServer(tc.frame, "data: [DONE]\n\n")
+			defer srv.Close()
+			_, done, errd := streamOnce(t, srv.URL)
+			if !errd {
+				t.Fatal("malformed data frame must yield an error")
+			}
+			if done {
+				t.Fatal("malformed data frame must not be followed by a successful Done")
+			}
+		})
+	}
+}

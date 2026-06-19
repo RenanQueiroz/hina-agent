@@ -24,11 +24,12 @@ type OpenAICompatProvider struct {
 	client  *http.Client
 }
 
-// NewOpenAICompatProvider builds the provider. baseURL defaults to the OpenAI API.
+// NewOpenAICompatProvider builds the provider for an explicit OpenAI-compatible
+// endpoint. baseURL must be set by the caller — there is deliberately NO cloud
+// default here: this is the local path, and Build/config.Validate require an
+// explicit base_url so a misconfiguration fails closed instead of silently
+// routing conversation history to cloud OpenAI.
 func NewOpenAICompatProvider(baseURL, apiKey, model string) *OpenAICompatProvider {
-	if baseURL == "" {
-		baseURL = "https://api.openai.com/v1"
-	}
 	return &OpenAICompatProvider{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
@@ -106,13 +107,23 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, req Request) (<-chan 
 				continue
 			}
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if data == "" {
+				continue // SSE keep-alive (`data:` with no payload)
+			}
 			if data == "[DONE]" {
 				sawTerminal = true
 				break
 			}
 			var chunk chatChunk
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-				continue // tolerate keep-alive / non-JSON lines
+				// A non-empty data frame that isn't valid JSON (or has an
+				// unexpected shape, e.g. {"error":"..."}) is a hard failure — never
+				// skip it and then let a later [DONE] mark the turn complete.
+				select {
+				case <-ctx.Done():
+				case out <- Delta{Err: fmt.Errorf("llm stream: malformed data frame: %w", err)}:
+				}
+				return
 			}
 			if chunk.Error != nil {
 				select {

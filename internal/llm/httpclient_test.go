@@ -30,7 +30,7 @@ func TestNoProxyClientIgnoresProxyEnv(t *testing.T) {
 // TestOpenAICompatUsesNoProxyTransport ensures the wiring actually reaches the
 // provider's HTTP client, not just the helper.
 func TestOpenAICompatUsesNoProxyTransport(t *testing.T) {
-	p := NewOpenAICompatProvider("", "k", "m")
+	p := NewOpenAICompatProvider("http://localhost:8080/v1", "k", "m")
 	tr, ok := p.client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("compat client transport = %T, want *http.Transport", p.client.Transport)
