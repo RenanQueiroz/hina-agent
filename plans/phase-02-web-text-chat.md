@@ -39,6 +39,13 @@ Pure web + Go HTTP; nothing OS-specific here. CI keeps building/serving on the W
 7. **Minimal text agent turn**: submit → build context → stream → persist `TurnCommitted`. No tool loop yet (or a no-op tool stage gated off). This is the seed of the Phase 6 custom agent loop.
 8. **Admin shell**: route tree + runtime status + log views + user list (mostly read-only this phase).
 
+## Stack notes (as built)
+- **LLM adapters:** `mock` (default, credential-free) + `openai` (official `openai-go/v3` Responses API, cloud) + `openai-compat` (thin `/chat/completions` client for local llama.cpp). Gemini (`go-genai`) remains optional/later.
+- **TanStack Table** backs the admin users grid. **Base UI primitives** are introduced when a component needs them (Dialog/Select/Menu); the current owned Tailwind components (`ui.tsx`) already follow the shadcn "owned components" philosophy. **React Hook Form + Zod + Ajv** are deliberately deferred to the Automation builder (Phase 9), per the main plan's "reserved for later."
+- **Generated TS** covers the wire DTOs + event envelope today; the full *editable-config* TS type lands with the admin config-editing UI in a later phase. `[paths]` overrides exist in `config.Config` now.
+- **CSRF:** cookie flows are protected by a same-origin (Origin/Referer) check on unsafe methods, in addition to `SameSite=Lax` + httpOnly.
+- **Event envelope `turn_id`** is populated on the envelope (not just payloads), so the `events.turn_id` column and the wire contract are honored.
+
 ## Persistence touchpoints
 Populate `conversations`, `turns` (canonical_text, mode=`text`), `events`. No schema changes beyond Phase 1's boundaries.
 

@@ -18,7 +18,18 @@ type Config struct {
 	Server ServerConfig `toml:"server"`
 	Agent  AgentConfig  `toml:"agent"`
 	LLM    LLMConfig    `toml:"llm"`
+	Paths  PathsConfig  `toml:"paths"`
 	Log    LogConfig    `toml:"log"`
+}
+
+// PathsConfig optionally overrides the OS-resolved application directories.
+// Empty fields keep the platform default. The config-file location itself is
+// not overridable here (use env vars), since the config is read before it.
+type PathsConfig struct {
+	Data    string `toml:"data_dir"`    // SQLite DB, vault, workspaces
+	Cache   string `toml:"cache_dir"`   // model/runtime downloads
+	Log     string `toml:"log_dir"`     // process/setup logs
+	Runtime string `toml:"runtime_dir"` // sockets, scratch, locks
 }
 
 // LLMConfig selects the active text LLM backend. Admin-owned; users do not pick
@@ -155,9 +166,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("agent.name is empty")
 	}
 	switch c.LLM.Provider {
-	case "", "mock", "openai":
+	case "", "mock", "openai", "openai-compat":
 	default:
-		return fmt.Errorf("llm.provider %q must be mock|openai", c.LLM.Provider)
+		return fmt.Errorf("llm.provider %q must be mock|openai|openai-compat", c.LLM.Provider)
 	}
 	return nil
 }

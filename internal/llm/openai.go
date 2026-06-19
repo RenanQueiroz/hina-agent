@@ -38,7 +38,7 @@ func NewOpenAICompatProvider(baseURL, apiKey, model string) *OpenAICompatProvide
 }
 
 // Name implements Provider.
-func (p *OpenAICompatProvider) Name() string { return "openai" }
+func (p *OpenAICompatProvider) Name() string { return "openai-compat" }
 
 type chatRequest struct {
 	Model    string    `json:"model"`

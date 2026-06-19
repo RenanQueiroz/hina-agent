@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import {
+  createColumnHelper,
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+} from "@tanstack/react-table";
+import type { AdminUser } from "../lib/api.gen";
 import { api } from "../lib/api";
 import { Card, Spinner } from "../components/ui";
 
@@ -42,36 +49,58 @@ export function AdminPage() {
 
       <Card className="p-4">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">Users</h2>
-        {users.isLoading ? (
-          <Spinner />
-        ) : (
-          <table className="w-full text-left text-sm">
-            <thead className="text-zinc-500">
-              <tr>
-                <th className="py-1 font-medium">Username</th>
-                <th className="py-1 font-medium">Role</th>
-                <th className="py-1 font-medium">Status</th>
-                <th className="py-1 font-medium">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.data?.map((u) => (
-                <tr key={u.id} className="border-t border-zinc-100 dark:border-zinc-800">
-                  <td className="py-1.5">{u.username}</td>
-                  <td className="py-1.5">{u.role}</td>
-                  <td className="py-1.5">{u.status}</td>
-                  <td className="py-1.5 text-zinc-500">
-                    {new Date(u.created_at).toLocaleDateString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+        {users.isLoading ? <Spinner /> : <UsersTable users={users.data ?? []} />}
       </Card>
 
       <LogsPanel />
     </div>
+  );
+}
+
+const columnHelper = createColumnHelper<AdminUser>();
+const userColumns = [
+  columnHelper.accessor("username", { header: "Username" }),
+  columnHelper.accessor("role", { header: "Role" }),
+  columnHelper.accessor("status", { header: "Status" }),
+  columnHelper.accessor("created_at", {
+    header: "Created",
+    cell: (c) => new Date(c.getValue()).toLocaleDateString(),
+  }),
+];
+
+// TanStack Table owns admin/user data grids (sorting/filtering/paging slot in
+// here as the user set grows).
+function UsersTable({ users }: { users: AdminUser[] }) {
+  const table = useReactTable({
+    data: users,
+    columns: userColumns,
+    getCoreRowModel: getCoreRowModel(),
+  });
+  return (
+    <table className="w-full text-left text-sm">
+      <thead className="text-zinc-500">
+        {table.getHeaderGroups().map((hg) => (
+          <tr key={hg.id}>
+            {hg.headers.map((h) => (
+              <th key={h.id} className="py-1 font-medium">
+                {flexRender(h.column.columnDef.header, h.getContext())}
+              </th>
+            ))}
+          </tr>
+        ))}
+      </thead>
+      <tbody>
+        {table.getRowModel().rows.map((row) => (
+          <tr key={row.id} className="border-t border-zinc-100 dark:border-zinc-800">
+            {row.getVisibleCells().map((cell) => (
+              <td key={cell.id} className="py-1.5">
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 

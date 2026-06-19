@@ -49,7 +49,7 @@ type Event struct {
 
 // New builds an event with a fresh id and a JSON-marshaled payload. Pass nil
 // payload for an empty object.
-func New(source, typ, conversationID, userID string, payload any) (Event, error) {
+func New(source, typ, conversationID, userID, turnID string, payload any) (Event, error) {
 	raw := json.RawMessage("{}")
 	if payload != nil {
 		b, err := json.Marshal(payload)
@@ -62,6 +62,7 @@ func New(source, typ, conversationID, userID string, payload any) (Event, error)
 		EventID:        id.New("evt"),
 		ConversationID: conversationID,
 		UserID:         userID,
+		TurnID:         turnID,
 		Source:         source,
 		Type:           typ,
 		Payload:        raw,

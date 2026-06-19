@@ -40,3 +40,12 @@ func (c *Cmd) Run() error {
 // KillTree terminates the process and all of its descendants. Safe to call even
 // if the process already exited.
 func (c *Cmd) KillTree() error { return c.killTree() }
+
+// LookPath resolves an executable in PATH, through the platform boundary.
+func LookPath(file string) (string, error) { return exec.LookPath(file) }
+
+// Output runs a short-lived command and returns its stdout. For long-running
+// processes that may spawn children, use Command + KillTree instead.
+func Output(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return Command(ctx, name, args...).Cmd.Output()
+}

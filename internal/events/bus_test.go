@@ -35,7 +35,7 @@ func TestBusPublishSubscribeReplay(t *testing.T) {
 	ch, cancel := bus.Subscribe(conv.ID)
 	defer cancel()
 
-	e, _ := New(SourceServer, TypeSessionCreated, conv.ID, u.ID, map[string]string{"title": "hi"})
+	e, _ := New(SourceServer, TypeSessionCreated, conv.ID, u.ID, "", map[string]string{"title": "hi"})
 	pub, err := bus.Publish(ctx, e)
 	if err != nil {
 		t.Fatalf("publish: %v", err)
@@ -53,7 +53,7 @@ func TestBusPublishSubscribeReplay(t *testing.T) {
 		t.Fatal("subscriber timed out")
 	}
 
-	e2, _ := New(SourceServer, TypeUserTextSubmitted, conv.ID, u.ID, nil)
+	e2, _ := New(SourceServer, TypeUserTextSubmitted, conv.ID, u.ID, "trn_x", nil)
 	if _, err := bus.Publish(ctx, e2); err != nil {
 		t.Fatalf("publish 2: %v", err)
 	}

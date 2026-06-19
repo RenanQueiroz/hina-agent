@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -108,7 +110,41 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 // --- middleware ---
 
 func (s *Server) withMiddleware(next http.Handler) http.Handler {
-	return s.recoverMW(s.logMW(next))
+	return s.recoverMW(s.logMW(s.csrfMW(next)))
+}
+
+// csrfMW protects cookie-authenticated state changes: for unsafe methods it
+// requires the Origin (or Referer) to be same-origin. Browsers always send
+// Origin on cross-origin unsafe requests, so a forged cross-site POST that
+// rides the session cookie is rejected; requests with neither header (non-browser
+// API clients, which don't carry the cookie automatically) are allowed.
+func (s *Server) csrfMW(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			if !sameOrigin(r) {
+				writeErr(w, http.StatusForbidden, "cross-origin request rejected")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
+	if origin == "" {
+		return true // no browser origin header -> not a cookie-CSRF vector
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
 }
 
 func (s *Server) recoverMW(next http.Handler) http.Handler {

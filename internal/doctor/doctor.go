@@ -5,7 +5,6 @@ package doctor
 
 import (
 	"context"
-	"os/exec"
 	"runtime"
 	"strings"
 
@@ -78,12 +77,12 @@ func (r *Report) add(name, status, detail string) {
 }
 
 func (r *Report) addTool(ctx context.Context, name, purpose, bin string, args ...string) {
-	path, err := exec.LookPath(bin)
+	path, err := platform.LookPath(bin)
 	if err != nil {
 		r.add(name, "missing", "not installed — "+purpose)
 		return
 	}
-	out, err := exec.CommandContext(ctx, path, args...).Output()
+	out, err := platform.Output(ctx, path, args...)
 	if err != nil {
 		r.add(name, "ok", path)
 		return

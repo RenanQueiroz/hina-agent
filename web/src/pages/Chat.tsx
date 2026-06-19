@@ -4,56 +4,8 @@ import { Copy, Plus, Send, Square } from "lucide-react";
 import { api } from "../lib/api";
 import { useConversationEvents } from "../lib/useEvents";
 import type { Event as ServerEvent } from "../lib/events.gen";
-import {
-  TypeAgentTextCompleted,
-  TypeAgentTextDelta,
-  TypeUserTextSubmitted,
-} from "../lib/events.gen";
+import { reduceEvent, type Msg } from "../lib/chatReducer";
 import { Button, Spinner } from "../components/ui";
-
-interface Msg {
-  id: string;
-  role: string;
-  text: string;
-  streaming?: boolean;
-  interrupted?: boolean;
-}
-
-function upsert(prev: Msg[], id: string, patch: Partial<Msg> & { role: string }): Msg[] {
-  const i = prev.findIndex((m) => m.id === id);
-  if (i === -1) return [...prev, { id, text: "", ...patch }];
-  const next = prev.slice();
-  next[i] = { ...next[i], ...patch };
-  return next;
-}
-
-function reduceEvent(prev: Msg[], e: ServerEvent): Msg[] {
-  const p = (e.payload ?? {}) as Record<string, unknown>;
-  const turnId = String(p.turn_id ?? "");
-  if (!turnId) return prev;
-  switch (e.type) {
-    case TypeUserTextSubmitted:
-      return upsert(prev, turnId, { role: "user", text: String(p.text ?? "") });
-    case TypeAgentTextDelta: {
-      const i = prev.findIndex((m) => m.id === turnId);
-      const delta = String(p.delta ?? "");
-      if (i === -1)
-        return [...prev, { id: turnId, role: "assistant", text: delta, streaming: true }];
-      const next = prev.slice();
-      next[i] = { ...next[i], text: next[i].text + delta, streaming: true };
-      return next;
-    }
-    case TypeAgentTextCompleted:
-      return upsert(prev, turnId, {
-        role: "assistant",
-        text: String(p.text ?? ""),
-        streaming: false,
-        interrupted: Boolean(p.interrupted),
-      });
-    default:
-      return prev;
-  }
-}
 
 export function ChatPage() {
   const qc = useQueryClient();

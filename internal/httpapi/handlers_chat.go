@@ -45,7 +45,7 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		return
 	}
 	conv, _ = s.store.GetConversation(r.Context(), conv.ID)
-	s.publish(r.Context(), events.SourceServer, events.TypeSessionCreated, conv.ID, u.ID, map[string]string{"title": conv.Title})
+	s.publish(r.Context(), events.SourceServer, events.TypeSessionCreated, conv.ID, u.ID, "", map[string]string{"title": conv.Title})
 	writeJSON(w, http.StatusCreated, conversationView(conv))
 }
 
@@ -101,8 +101,8 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.publish(ctx, events.SourceClient, events.TypeUserTextSubmitted, conv.ID, u.ID,
-		map[string]string{"turn_id": userTurn.ID, "text": body.Text})
+	s.publish(ctx, events.SourceClient, events.TypeUserTextSubmitted, conv.ID, u.ID, userTurn.ID,
+		map[string]string{"text": body.Text})
 
 	// 2. Build model context from the full canonical history (includes this turn).
 	turns, err := s.store.ListTurns(ctx, conv.ID)
@@ -114,12 +114,12 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Stream the assistant reply.
 	asTurnID := id.New("trn")
-	s.publish(ctx, events.SourceServer, events.TypeTurnStarted, conv.ID, u.ID, map[string]string{"turn_id": asTurnID})
+	s.publish(ctx, events.SourceServer, events.TypeTurnStarted, conv.ID, u.ID, asTurnID, nil)
 
 	stream, err := s.provider.Stream(ctx, llm.Request{Messages: msgs})
 	if err != nil {
-		s.publish(context.Background(), events.SourceServer, events.TypeError, conv.ID, u.ID,
-			map[string]string{"turn_id": asTurnID, "error": err.Error()})
+		s.publish(context.Background(), events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
+			map[string]string{"error": err.Error()})
 		writeErr(w, http.StatusBadGateway, "llm backend error")
 		return
 	}
@@ -135,8 +135,8 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		sb.WriteString(d.Text)
-		s.publishEphemeral(events.SourceServer, events.TypeAgentTextDelta, conv.ID, u.ID,
-			map[string]string{"turn_id": asTurnID, "delta": d.Text})
+		s.publishEphemeral(events.SourceServer, events.TypeAgentTextDelta, conv.ID, u.ID, asTurnID,
+			map[string]string{"delta": d.Text})
 	}
 	interrupted := ctx.Err() != nil
 
@@ -155,12 +155,12 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("persist assistant turn", "err", err)
 	}
 	if streamErr != nil && !interrupted {
-		s.publish(pctx, events.SourceServer, events.TypeError, conv.ID, u.ID,
-			map[string]string{"turn_id": asTurnID, "error": streamErr.Error()})
+		s.publish(pctx, events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
+			map[string]string{"error": streamErr.Error()})
 	}
-	s.publish(pctx, events.SourceServer, events.TypeAgentTextCompleted, conv.ID, u.ID,
-		map[string]any{"turn_id": asTurnID, "text": text, "interrupted": interrupted})
-	s.publish(pctx, events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, map[string]string{"turn_id": asTurnID})
+	s.publish(pctx, events.SourceServer, events.TypeAgentTextCompleted, conv.ID, u.ID, asTurnID,
+		map[string]any{"text": text, "interrupted": interrupted})
+	s.publish(pctx, events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil)
 
 	if interrupted {
 		return // client is gone; response write would fail
@@ -247,8 +247,8 @@ func writeSSE(w http.ResponseWriter, e events.Event) {
 	fmt.Fprintf(w, "data: %s\n\n", data)
 }
 
-func (s *Server) publishEphemeral(source, typ, convID, userID string, payload any) {
-	e, err := events.New(source, typ, convID, userID, payload)
+func (s *Server) publishEphemeral(source, typ, convID, userID, turnID string, payload any) {
+	e, err := events.New(source, typ, convID, userID, turnID, payload)
 	if err != nil {
 		s.log.Error("build ephemeral event", "type", typ, "err", err)
 		return
@@ -276,8 +276,8 @@ func (s *Server) loadOwnedConversation(w http.ResponseWriter, r *http.Request) (
 	return conv, true
 }
 
-func (s *Server) publish(ctx context.Context, source, typ, convID, userID string, payload any) {
-	e, err := events.New(source, typ, convID, userID, payload)
+func (s *Server) publish(ctx context.Context, source, typ, convID, userID, turnID string, payload any) {
+	e, err := events.New(source, typ, convID, userID, turnID, payload)
 	if err != nil {
 		s.log.Error("build event", "type", typ, "err", err)
 		return

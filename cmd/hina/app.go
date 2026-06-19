@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/RenanQueiroz/hina-agent/internal/config"
 	"github.com/RenanQueiroz/hina-agent/internal/logbuf"
@@ -28,11 +29,13 @@ func openApp() (*app, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve paths: %w", err)
 	}
-	if err := platform.EnsureAll(paths); err != nil {
-		return nil, err
-	}
+	// Load config before ensuring dirs so a [paths] override can relocate them.
 	cfg, err := config.Load(paths.ConfigFilePath())
 	if err != nil {
+		return nil, err
+	}
+	paths = applyPathOverrides(paths, cfg.Paths)
+	if err := platform.EnsureAll(paths); err != nil {
 		return nil, err
 	}
 	st, err := store.Open(paths.DBPath())
@@ -47,6 +50,25 @@ func (a *app) close() {
 	if a != nil && a.store != nil {
 		_ = a.store.Close()
 	}
+}
+
+// applyPathOverrides applies optional [paths] config over the resolved dirs.
+func applyPathOverrides(p platform.Paths, o config.PathsConfig) platform.Paths {
+	if o.Data != "" {
+		p.Data = o.Data
+		p.Runtime = filepath.Join(o.Data, "run")
+		p.Log = filepath.Join(o.Data, "logs")
+	}
+	if o.Cache != "" {
+		p.Cache = o.Cache
+	}
+	if o.Runtime != "" {
+		p.Runtime = o.Runtime
+	}
+	if o.Log != "" {
+		p.Log = o.Log
+	}
+	return p
 }
 
 func newLogger(lc config.LogConfig, buf *logbuf.Buffer) *slog.Logger {

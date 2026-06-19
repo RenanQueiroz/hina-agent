@@ -119,14 +119,19 @@ name = "Hina"
 name_aliases = []
 
 [llm]
-# Admin-owned text backend. "mock" needs no credentials; "openai" targets any
-# OpenAI-compatible endpoint (cloud OpenAI by default, or a local llama.cpp
-# server via base_url).
-provider = "mock"   # mock | openai
+# Admin-owned text backend (users never choose). "mock" needs no credentials.
+# "openai" = cloud OpenAI via the Responses API. "openai-compat" = any
+# OpenAI-compatible /chat/completions endpoint, e.g. a local llama.cpp server.
+provider = "mock"   # mock | openai | openai-compat
 # model = "gpt-5.4-mini"
-# base_url = "http://localhost:8080/v1"
+# base_url = "http://localhost:8080/v1"   # required for openai-compat (local)
 # api_key = "${OPENAI_API_KEY}"
 system_prompt = "You are Hina, a helpful, concise assistant."
+
+# [paths]  # optional overrides of the OS-resolved app directories
+# data_dir = "/var/lib/hina"
+# cache_dir = "/var/cache/hina"
+# log_dir = "/var/log/hina"
 
 [log]
 level = "info"    # debug|info|warn|error

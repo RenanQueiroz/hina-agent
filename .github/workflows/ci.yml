@@ -42,6 +42,8 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: Migrate smoke (cross-platform)
+        run: go run ./cmd/hina migrate
       - name: Doctor smoke (non-interactive)
         run: go run ./cmd/hina doctor --json
 
@@ -82,6 +84,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run test
       - run: npm run build
 
   gen-check:
