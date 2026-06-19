@@ -181,6 +181,12 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("llm.provider %q must be mock|openai|openai-compat", c.LLM.Provider)
 	}
+	// openai-compat is the LOCAL OpenAI-compatible path; require an explicit
+	// base_url so a misconfigured local backend fails closed rather than silently
+	// sending conversation history to cloud OpenAI.
+	if c.LLM.Provider == "openai-compat" && c.LLM.BaseURL == "" {
+		return fmt.Errorf("llm.base_url is required when llm.provider=openai-compat (e.g. http://localhost:8080/v1); refusing to default to cloud OpenAI")
+	}
 	return nil
 }
 

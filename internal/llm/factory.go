@@ -31,6 +31,10 @@ func Build(c Config) (Provider, error) {
 		if c.Model == "" {
 			return nil, fmt.Errorf("llm.model is required when llm.provider=openai-compat")
 		}
+		// Fail closed on a missing local endpoint rather than defaulting to cloud.
+		if c.BaseURL == "" {
+			return nil, fmt.Errorf("llm.base_url is required when llm.provider=openai-compat (the local endpoint); refusing to default to cloud OpenAI")
+		}
 		return NewOpenAICompatProvider(c.BaseURL, c.APIKey, c.Model), nil
 	default:
 		return nil, fmt.Errorf("unknown llm.provider %q (want mock|openai|openai-compat)", c.Provider)

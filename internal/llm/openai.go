@@ -55,6 +55,11 @@ type chatChunk struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+	// Some OpenAI-compatible servers stream an error frame mid-stream instead of
+	// (or after) a non-200 status; surface it as a hard failure.
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 // Stream implements Provider.
@@ -90,6 +95,11 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, req Request) (<-chan 
 		defer resp.Body.Close()
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		// sawTerminal records that the server signalled normal completion — a
+		// `[DONE]` sentinel or a chunk carrying a finish_reason. A connection that
+		// closes cleanly WITHOUT one of these is a truncated/aborted response, not
+		// a successful turn, so we must not commit it as canonical text.
+		sawTerminal := false
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" || !strings.HasPrefix(line, "data:") {
@@ -97,13 +107,24 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, req Request) (<-chan 
 			}
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if data == "[DONE]" {
+				sawTerminal = true
 				break
 			}
 			var chunk chatChunk
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				continue // tolerate keep-alive / non-JSON lines
 			}
+			if chunk.Error != nil {
+				select {
+				case <-ctx.Done():
+				case out <- Delta{Err: fmt.Errorf("llm backend error: %s", chunk.Error.Message)}:
+				}
+				return
+			}
 			for _, c := range chunk.Choices {
+				if c.FinishReason != nil && *c.FinishReason != "" {
+					sawTerminal = true
+				}
 				if c.Delta.Content == "" {
 					continue
 				}
@@ -116,6 +137,12 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, req Request) (<-chan 
 		}
 		if err := scanner.Err(); err != nil && ctx.Err() == nil {
 			out <- Delta{Err: err}
+			return
+		}
+		// A clean EOF before any terminal marker means the backend dropped the
+		// connection mid-response: fail the turn rather than committing a partial.
+		if !sawTerminal && ctx.Err() == nil {
+			out <- Delta{Err: fmt.Errorf("llm stream ended before completion (no [DONE] or finish_reason)")}
 			return
 		}
 		select {

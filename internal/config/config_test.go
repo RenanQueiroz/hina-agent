@@ -2,6 +2,20 @@ package config
 
 import "testing"
 
+// TestValidateCompatBaseURL locks the fail-closed rule: the local openai-compat
+// provider requires an explicit base_url (never silently routes to cloud).
+func TestValidateCompatBaseURL(t *testing.T) {
+	c := Default()
+	c.LLM.Provider = "openai-compat"
+	if err := c.Validate(); err == nil {
+		t.Fatal("openai-compat without base_url must fail validation")
+	}
+	c.LLM.BaseURL = "http://localhost:8080/v1"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("openai-compat with base_url should validate: %v", err)
+	}
+}
+
 // TestValidateLANTLS locks the LAN security invariants: a non-loopback bind
 // needs both an explicit LAN opt-in AND TLS (cookies must not cross the LAN in
 // cleartext), unless the operator explicitly opts into insecure dev LAN.
