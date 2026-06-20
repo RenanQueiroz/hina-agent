@@ -82,6 +82,36 @@ export interface AdminLLMInfo {
   base_url: string;
 }
 /**
+ * RTCSessionStats is one live voice session's metrics for the admin view: app
+ * counters plus Pion's network stats (loss/jitter/RTT). Mirrors
+ * rtc.SessionStats; the realtime package stays decoupled from this wire format.
+ */
+export interface RTCSessionStats {
+  session_id: string;
+  user_id: string;
+  conversation_id: string;
+  mode: string;
+  uptime_ms: number /* int64 */;
+  rtp_packets_in: number /* uint64 */;
+  decode_errors: number /* uint64 */;
+  frames_out: number /* uint64 */;
+  bytes_out: number /* uint64 */;
+  frames_dropped: number /* uint64 */;
+  interrupts: number /* uint64 */;
+  played_ms: number /* int64 */;
+  capture_ms: number /* int64 */;
+  app_rtt_micros: number /* int64 */;
+  packets_received: number /* uint32 */;
+  packets_lost: number /* int32 */;
+  jitter_seconds: number /* float64 */;
+}
+/**
+ * RTCStats is the GET /admin/rtc response: every active live session.
+ */
+export interface RTCStats {
+  sessions: RTCSessionStats[];
+}
+/**
  * AdminUser is a user row in the admin list.
  */
 export interface AdminUser {

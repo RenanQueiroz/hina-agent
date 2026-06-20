@@ -20,6 +20,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/id"
 	"github.com/RenanQueiroz/hina-agent/internal/llm"
 	"github.com/RenanQueiroz/hina-agent/internal/logbuf"
+	"github.com/RenanQueiroz/hina-agent/internal/rtc"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
 	"github.com/RenanQueiroz/hina-agent/internal/wire"
 	webui "github.com/RenanQueiroz/hina-agent/web"
@@ -32,6 +33,7 @@ type Server struct {
 	bus      *events.Bus
 	auth     *auth.Manager
 	provider llm.Provider
+	rtc      *rtc.Manager
 	logs     *logbuf.Buffer
 	log      *slog.Logger
 	ready    atomic.Bool
@@ -77,6 +79,10 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // SetReady marks readiness (migrations done, config valid).
 func (s *Server) SetReady(v bool) { s.ready.Store(v) }
 
+// SetRealtime installs the WebRTC manager (post-construction, like SetReady).
+// When unset, the realtime routes respond 503.
+func (s *Server) SetRealtime(m *rtc.Manager) { s.rtc = m }
+
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
@@ -97,11 +103,15 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/conversations/{id}/events", s.requireUser(s.handleEvents))
 	mux.Handle("GET /api/v1/config", s.requireUser(s.handleConfig))
 
+	// WebRTC signaling (mirrors OpenAI's application/sdp /realtime/calls).
+	mux.Handle("POST /api/v1/realtime/calls", s.requireUser(s.handleRealtimeCall))
+
 	// Admin routes.
 	mux.Handle("GET /api/v1/admin/users", s.requireAdmin(s.handleListUsers))
 	mux.Handle("GET /api/v1/admin/llm", s.requireAdmin(s.handleAdminLLM))
 	mux.Handle("GET /api/v1/admin/runtime", s.requireAdmin(s.handleAdminRuntime))
 	mux.Handle("GET /api/v1/admin/logs", s.requireAdmin(s.handleAdminLogs))
+	mux.Handle("GET /api/v1/admin/rtc", s.requireAdmin(s.handleAdminRTC))
 
 	// SPA: the embedded web client serves all remaining paths (more specific
 	// /healthz, /readyz, /api/v1/* patterns take precedence).

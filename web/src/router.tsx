@@ -6,12 +6,13 @@ import {
   Outlet,
 } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { LogOut, MessageSquare, Moon, Settings, Sun } from "lucide-react";
+import { LogOut, MessageSquare, Moon, Radio, Settings, Sun } from "lucide-react";
 import { api } from "./lib/api";
 import { useUIPrefs } from "./lib/store";
 import { Button } from "./components/ui";
 import { ChatPage } from "./pages/Chat";
 import { AdminPage } from "./pages/Admin";
+import { LivePage } from "./pages/Live";
 
 const navLink =
   "inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800";
@@ -35,6 +36,9 @@ function Layout() {
         <nav className="ml-4 flex gap-1">
           <Link to="/" className={navLink} activeProps={{ className: navLinkActive }} activeOptions={{ exact: true }}>
             <MessageSquare size={16} /> Chat
+          </Link>
+          <Link to="/live" className={navLink} activeProps={{ className: navLinkActive }}>
+            <Radio size={16} /> Live
           </Link>
           {me.data?.role === "admin" && (
             <Link to="/admin" className={navLink} activeProps={{ className: navLinkActive }}>
@@ -61,13 +65,14 @@ function Layout() {
 
 const rootRoute = createRootRoute({ component: Layout });
 const chatRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: ChatPage });
+const liveRoute = createRoute({ getParentRoute: () => rootRoute, path: "/live", component: LivePage });
 const adminRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/admin",
   component: AdminPage,
 });
 
-const routeTree = rootRoute.addChildren([chatRoute, adminRoute]);
+const routeTree = rootRoute.addChildren([chatRoute, liveRoute, adminRoute]);
 
 export const router = createRouter({ routeTree });
 

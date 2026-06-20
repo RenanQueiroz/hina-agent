@@ -33,6 +33,23 @@ const (
 	TypeError              = "ErrorEvent"
 )
 
+// Phase 3 audio/live event types. They share the same envelope and flow over
+// both the SSE stream (admin/owner observability) and the WebRTC events
+// datachannel (the live client). In Phase 3 they are delivered live-only
+// (ephemeral, seq==0) — transport proof, not durable transcript; the durable
+// voice-turn record lands in Phase 6. ModeChanged doubles as the client→server
+// control to select the outbound source (loopback|tone|idle) and the
+// server→client acknowledgement.
+const (
+	TypeModeChanged      = "ModeChanged"
+	TypeAudioInputFrame  = "AudioInputFrame"
+	TypeAudioOutputFrame = "AudioOutputFrame"
+	TypePlaybackStarted  = "PlaybackStarted"
+	TypePlaybackProgress = "PlaybackProgress"
+	TypePlaybackStopped  = "PlaybackStopped"
+	TypeUserInterrupted  = "UserInterrupted"
+)
+
 // Event is the typed envelope. JSON field names are the wire contract; note
 // ConversationID serializes as "session_id" (the product-level "session").
 type Event struct {

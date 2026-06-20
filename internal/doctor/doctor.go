@@ -59,11 +59,16 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 	r.addTool(ctx, "sbx", "Phase 7 sandbox runtime", "sbx", "--version")
 	r.addTool(ctx, "llama.cpp (llama-server)", "Phase 4 local LLM", "llama-server", "--version")
 
-	// HTTPS / LAN.
+	// WebRTC voice bridge — pure Go (Pion), so always available with no native
+	// toolchain. Hands-on browser loopback is validated in Phase 11.
+	r.add("webrtc voice bridge (pion)", "ok", "pure-Go media bridge; no native toolchain")
+
+	// HTTPS / LAN. Browser mic capture (getUserMedia) requires a secure context:
+	// localhost is exempt, but a second LAN device needs HTTPS with a real cert.
 	if cfg.Server.TLSEnabled() {
 		r.add("https cert", "ok", cfg.Server.TLSCert)
 	} else {
-		r.add("https cert", "unavailable", "no cert configured (localhost is fine; LAN needs HTTPS)")
+		r.add("https cert", "unavailable", "no cert configured (localhost mic is fine; LAN mic needs HTTPS — see mkcert/reverse-proxy guidance)")
 	}
 
 	// Local ONNX voice — gated on the ORT/DLL spike; not yet implemented.

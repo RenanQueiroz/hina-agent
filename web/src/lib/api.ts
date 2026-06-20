@@ -6,6 +6,7 @@ import type {
   Conversation,
   LoginResponse,
   PostMessageResponse,
+  RTCStats,
   Turn,
   User,
 } from "./api.gen";
@@ -80,4 +81,5 @@ export const api = {
       (r) => r.users ?? [],
     ),
   adminLLM: () => req<AdminLLMInfo>("/api/v1/admin/llm"),
+  adminRTC: () => req<RTCStats>("/api/v1/admin/rtc"),
 };

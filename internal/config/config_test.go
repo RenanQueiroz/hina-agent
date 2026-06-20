@@ -16,6 +16,40 @@ func TestValidateCompatBaseURL(t *testing.T) {
 	}
 }
 
+// TestValidateICEServers locks the realtime ICE checks: only stun/turn schemes
+// are accepted, and a TURN relay (which Pion rejects without credentials) must
+// carry username+credential or fail closed at config load.
+func TestValidateICEServers(t *testing.T) {
+	c := Default()
+	c.Realtime.ICEServers = []ICEServer{
+		{URLs: []string{"stun:stun.l.google.com:19302"}},
+		{URLs: []string{"turns:turn.example.com:5349"}, Username: "u", Credential: "p"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid ICE servers should pass: %v", err)
+	}
+
+	c.Realtime.ICEServers = []ICEServer{{URLs: []string{"http://not-an-ice-server"}}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("non-stun/turn ICE URL must fail validation")
+	}
+
+	c.Realtime.ICEServers = []ICEServer{{URLs: []string{"stun:"}}} // scheme only, no host
+	if err := c.Validate(); err == nil {
+		t.Fatal("ICE URL with no host must fail validation")
+	}
+
+	c.Realtime.ICEServers = []ICEServer{{URLs: []string{"turn:turn.example.com:3478"}}} // TURN, no creds
+	if err := c.Validate(); err == nil {
+		t.Fatal("turn: URL without credentials must fail validation")
+	}
+
+	c.Realtime.ICEServers = []ICEServer{{Username: "u", Credential: "p"}} // no urls
+	if err := c.Validate(); err == nil {
+		t.Fatal("ICE server with no urls must fail validation")
+	}
+}
+
 // TestValidateLANTLS locks the LAN security invariants: a non-loopback bind
 // needs both an explicit LAN opt-in AND TLS (cookies must not cross the LAN in
 // cleartext), unless the operator explicitly opts into insecure dev LAN.

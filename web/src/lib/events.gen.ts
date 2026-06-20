@@ -72,6 +72,76 @@ export const TypeAgentTextCompleted = "AgentTextCompleted";
  */
 export const TypeError = "ErrorEvent";
 /**
+ * Phase 3 audio/live event types. They share the same envelope and flow over
+ * both the SSE stream (admin/owner observability) and the WebRTC events
+ * datachannel (the live client). In Phase 3 they are delivered live-only
+ * (ephemeral, seq==0) — transport proof, not durable transcript; the durable
+ * voice-turn record lands in Phase 6. ModeChanged doubles as the client→server
+ * control to select the outbound source (loopback|tone|idle) and the
+ * server→client acknowledgement.
+ */
+export const TypeModeChanged = "ModeChanged";
+/**
+ * Phase 3 audio/live event types. They share the same envelope and flow over
+ * both the SSE stream (admin/owner observability) and the WebRTC events
+ * datachannel (the live client). In Phase 3 they are delivered live-only
+ * (ephemeral, seq==0) — transport proof, not durable transcript; the durable
+ * voice-turn record lands in Phase 6. ModeChanged doubles as the client→server
+ * control to select the outbound source (loopback|tone|idle) and the
+ * server→client acknowledgement.
+ */
+export const TypeAudioInputFrame = "AudioInputFrame";
+/**
+ * Phase 3 audio/live event types. They share the same envelope and flow over
+ * both the SSE stream (admin/owner observability) and the WebRTC events
+ * datachannel (the live client). In Phase 3 they are delivered live-only
+ * (ephemeral, seq==0) — transport proof, not durable transcript; the durable
+ * voice-turn record lands in Phase 6. ModeChanged doubles as the client→server
+ * control to select the outbound source (loopback|tone|idle) and the
+ * server→client acknowledgement.
+ */
+export const TypeAudioOutputFrame = "AudioOutputFrame";
+/**
+ * Phase 3 audio/live event types. They share the same envelope and flow over
+ * both the SSE stream (admin/owner observability) and the WebRTC events
+ * datachannel (the live client). In Phase 3 they are delivered live-only
+ * (ephemeral, seq==0) — transport proof, not durable transcript; the durable
+ * voice-turn record lands in Phase 6. ModeChanged doubles as the client→server
+ * control to select the outbound source (loopback|tone|idle) and the
+ * server→client acknowledgement.
+ */
+export const TypePlaybackStarted = "PlaybackStarted";
+/**
+ * Phase 3 audio/live event types. They share the same envelope and flow over
+ * both the SSE stream (admin/owner observability) and the WebRTC events
+ * datachannel (the live client). In Phase 3 they are delivered live-only
+ * (ephemeral, seq==0) — transport proof, not durable transcript; the durable
+ * voice-turn record lands in Phase 6. ModeChanged doubles as the client→server
+ * control to select the outbound source (loopback|tone|idle) and the
+ * server→client acknowledgement.
+ */
+export const TypePlaybackProgress = "PlaybackProgress";
+/**
+ * Phase 3 audio/live event types. They share the same envelope and flow over
+ * both the SSE stream (admin/owner observability) and the WebRTC events
+ * datachannel (the live client). In Phase 3 they are delivered live-only
+ * (ephemeral, seq==0) — transport proof, not durable transcript; the durable
+ * voice-turn record lands in Phase 6. ModeChanged doubles as the client→server
+ * control to select the outbound source (loopback|tone|idle) and the
+ * server→client acknowledgement.
+ */
+export const TypePlaybackStopped = "PlaybackStopped";
+/**
+ * Phase 3 audio/live event types. They share the same envelope and flow over
+ * both the SSE stream (admin/owner observability) and the WebRTC events
+ * datachannel (the live client). In Phase 3 they are delivered live-only
+ * (ephemeral, seq==0) — transport proof, not durable transcript; the durable
+ * voice-turn record lands in Phase 6. ModeChanged doubles as the client→server
+ * control to select the outbound source (loopback|tone|idle) and the
+ * server→client acknowledgement.
+ */
+export const TypeUserInterrupted = "UserInterrupted";
+/**
  * Event is the typed envelope. JSON field names are the wire contract; note
  * ConversationID serializes as "session_id" (the product-level "session").
  */

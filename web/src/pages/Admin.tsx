@@ -6,7 +6,7 @@ import {
   getCoreRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import type { AdminUser } from "../lib/api.gen";
+import type { AdminUser, RTCSessionStats } from "../lib/api.gen";
 import { api } from "../lib/api";
 import { Card, Spinner } from "../components/ui";
 
@@ -52,8 +52,58 @@ export function AdminPage() {
         {users.isLoading ? <Spinner /> : <UsersTable users={users.data ?? []} />}
       </Card>
 
+      <LiveSessionsPanel />
       <LogsPanel />
     </div>
+  );
+}
+
+// LiveSessionsPanel polls the WebRTC stats so an admin can watch active voice
+// sessions and their loss/jitter/RTT in near real time (Phase 3 instrumentation).
+function LiveSessionsPanel() {
+  const rtc = useQuery({
+    queryKey: ["admin", "rtc"],
+    queryFn: api.adminRTC,
+    refetchInterval: 2000,
+  });
+  const sessions = rtc.data?.sessions ?? [];
+  return (
+    <Card className="p-4">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">
+        Live voice sessions
+      </h2>
+      {sessions.length === 0 ? (
+        <p className="text-sm text-zinc-400">No active sessions.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-zinc-500">
+              <tr>
+                {["Session", "Mode", "Pkts in", "Loss", "Jitter", "RTT", "Played", "Drops"].map((h) => (
+                  <th key={h} className="py-1 pr-3 font-medium">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="font-mono text-xs">
+              {sessions.map((s: RTCSessionStats) => (
+                <tr key={s.session_id} className="border-t border-zinc-100 dark:border-zinc-800">
+                  <td className="py-1.5 pr-3">{s.session_id.slice(0, 12)}…</td>
+                  <td className="py-1.5 pr-3">{s.mode}</td>
+                  <td className="py-1.5 pr-3">{s.rtp_packets_in}</td>
+                  <td className="py-1.5 pr-3">{s.packets_lost}</td>
+                  <td className="py-1.5 pr-3">{(s.jitter_seconds * 1000).toFixed(1)} ms</td>
+                  <td className="py-1.5 pr-3">{(s.app_rtt_micros / 1000).toFixed(1)} ms</td>
+                  <td className="py-1.5 pr-3">{s.played_ms} ms</td>
+                  <td className="py-1.5 pr-3">{s.frames_dropped}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 

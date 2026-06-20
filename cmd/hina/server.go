@@ -9,10 +9,13 @@ import (
 	"time"
 
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
+	"github.com/RenanQueiroz/hina-agent/internal/config"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/httpapi"
 	"github.com/RenanQueiroz/hina-agent/internal/llm"
 	"github.com/RenanQueiroz/hina-agent/internal/platform"
+	"github.com/RenanQueiroz/hina-agent/internal/rtc"
+	"github.com/pion/webrtc/v4"
 )
 
 func cmdServer(args []string) error {
@@ -77,7 +80,17 @@ func cmdServer(args []string) error {
 
 	bus := events.NewBus(a.store)
 	am := auth.NewManager(a.store, a.cfg.Server.TLSEnabled())
+
+	// WebRTC voice bridge (Phase 3). The bus is its SSE event sink so live
+	// audio/lifecycle events are observable on the conversation stream.
+	rtcMgr, err := rtc.NewManager(rtc.Config{ICEServers: iceServers(a.cfg.Realtime.ICEServers), Log: a.log}, bus)
+	if err != nil {
+		return err
+	}
+	defer rtcMgr.Close()
+
 	srv := httpapi.New(a.cfg, a.store, bus, am, provider, a.logs, a.log)
+	srv.SetRealtime(rtcMgr)
 	srv.SetReady(true)
 
 	httpSrv := &http.Server{
@@ -112,4 +125,25 @@ func cmdServer(args []string) error {
 		return nil
 	}
 	return err
+}
+
+// iceServers maps configured ICE servers to Pion's ICEServer list, carrying
+// TURN credentials when present. Empty input yields no servers (host candidates
+// only — fine for localhost/LAN). Config validation has already ensured any
+// turn:/turns: entry has credentials.
+func iceServers(servers []config.ICEServer) []webrtc.ICEServer {
+	if len(servers) == 0 {
+		return nil
+	}
+	out := make([]webrtc.ICEServer, 0, len(servers))
+	for _, s := range servers {
+		ice := webrtc.ICEServer{URLs: s.URLs}
+		if s.Username != "" {
+			ice.Username = s.Username
+			ice.Credential = s.Credential
+			ice.CredentialType = webrtc.ICECredentialTypePassword
+		}
+		out = append(out, ice)
+	}
+	return out
 }

@@ -67,6 +67,37 @@ type AdminLLMInfo struct {
 	BaseURL  string `json:"base_url"`
 }
 
+// RTCSessionStats is one live voice session's metrics for the admin view: app
+// counters plus Pion's network stats (loss/jitter/RTT). Mirrors
+// rtc.SessionStats; the realtime package stays decoupled from this wire format.
+type RTCSessionStats struct {
+	SessionID      string `json:"session_id"`
+	UserID         string `json:"user_id"`
+	ConversationID string `json:"conversation_id"`
+	Mode           string `json:"mode"`
+	UptimeMs       int64  `json:"uptime_ms"`
+
+	RTPPacketsIn  uint64 `json:"rtp_packets_in"`
+	DecodeErrors  uint64 `json:"decode_errors"`
+	FramesOut     uint64 `json:"frames_out"`
+	BytesOut      uint64 `json:"bytes_out"`
+	FramesDropped uint64 `json:"frames_dropped"`
+	Interrupts    uint64 `json:"interrupts"`
+
+	PlayedMs     int64 `json:"played_ms"`
+	CaptureMs    int64 `json:"capture_ms"`
+	AppRTTMicros int64 `json:"app_rtt_micros"`
+
+	PacketsReceived uint32  `json:"packets_received"`
+	PacketsLost     int32   `json:"packets_lost"`
+	JitterSeconds   float64 `json:"jitter_seconds"`
+}
+
+// RTCStats is the GET /admin/rtc response: every active live session.
+type RTCStats struct {
+	Sessions []RTCSessionStats `json:"sessions"`
+}
+
 // AdminUser is a user row in the admin list.
 type AdminUser struct {
 	ID                 string    `json:"id"`

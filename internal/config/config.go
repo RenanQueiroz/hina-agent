@@ -9,17 +9,43 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
 // Config is the full server configuration.
 type Config struct {
-	Server ServerConfig `toml:"server"`
-	Agent  AgentConfig  `toml:"agent"`
-	LLM    LLMConfig    `toml:"llm"`
-	Paths  PathsConfig  `toml:"paths"`
-	Log    LogConfig    `toml:"log"`
+	Server   ServerConfig   `toml:"server"`
+	Agent    AgentConfig    `toml:"agent"`
+	LLM      LLMConfig      `toml:"llm"`
+	Realtime RealtimeConfig `toml:"realtime"`
+	Paths    PathsConfig    `toml:"paths"`
+	Log      LogConfig      `toml:"log"`
+}
+
+// RealtimeConfig configures the WebRTC voice bridge (Phase 3). ICEServers is
+// optional: localhost and most LANs connect on host candidates alone, so the
+// default (none) needs no external STUN/TURN.
+type RealtimeConfig struct {
+	ICEServers []ICEServer `toml:"ice_servers"`
+}
+
+// ICEServer is one STUN/TURN server. URLs use the standard ICE scheme
+// (stun:/stuns:/turn:/turns:). TURN relays require Username+Credential; STUN
+// does not. Configured as a TOML array of tables:
+//
+//	[[realtime.ice_servers]]
+//	urls = ["stun:stun.l.google.com:19302"]
+//
+//	[[realtime.ice_servers]]
+//	urls = ["turn:turn.example.com:3478"]
+//	username = "user"
+//	credential = "secret"
+type ICEServer struct {
+	URLs       []string `toml:"urls"`
+	Username   string   `toml:"username"`
+	Credential string   `toml:"credential"`
 }
 
 // PathsConfig optionally overrides the OS-resolved application directories.
@@ -132,8 +158,30 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("HINA_LLM_API_KEY"); v != "" {
 		c.LLM.APIKey = v
 	}
+	if v := os.Getenv("HINA_REALTIME_ICE_SERVERS"); v != "" {
+		// Env is the simple STUN path: a comma-separated URL list, each its own
+		// server with no credentials. TURN (which needs credentials) is config-file
+		// only — Validate rejects a credential-less turn: URL.
+		var servers []ICEServer
+		for _, u := range splitAndTrim(v) {
+			servers = append(servers, ICEServer{URLs: []string{u}})
+		}
+		c.Realtime.ICEServers = servers
+	}
 	// Expand ${VAR} references (e.g. api_key = "${OPENAI_API_KEY}").
 	c.LLM.APIKey = expandEnv(c.LLM.APIKey)
+}
+
+// splitAndTrim splits a comma-separated env value into non-empty trimmed items.
+func splitAndTrim(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 var envRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
@@ -187,7 +235,38 @@ func (c Config) Validate() error {
 	if c.LLM.Provider == "openai-compat" && c.LLM.BaseURL == "" {
 		return fmt.Errorf("llm.base_url is required when llm.provider=openai-compat (e.g. http://localhost:8080/v1); refusing to default to cloud OpenAI")
 	}
+	for _, srv := range c.Realtime.ICEServers {
+		if len(srv.URLs) == 0 {
+			return fmt.Errorf("realtime.ice_servers entry has no urls")
+		}
+		needsCred := false
+		for _, u := range srv.URLs {
+			if !isICEURL(u) {
+				return fmt.Errorf("realtime.ice_servers url %q must be a stun:/stuns:/turn:/turns: URL", u)
+			}
+			if strings.HasPrefix(u, "turn:") || strings.HasPrefix(u, "turns:") {
+				needsCred = true
+			}
+		}
+		// A credential-less TURN server is rejected by Pion at NewPeerConnection,
+		// which would break every call. Fail closed here with a clear message
+		// instead of surfacing as a runtime 502.
+		if needsCred && (srv.Username == "" || srv.Credential == "") {
+			return fmt.Errorf("realtime.ice_servers entry with a turn:/turns: url requires username and credential")
+		}
+	}
 	return nil
+}
+
+// isICEURL reports whether u is a syntactically valid ICE server URL (scheme +
+// non-empty remainder; Pion does the deeper host parse at connect time).
+func isICEURL(u string) bool {
+	for _, scheme := range []string{"stun:", "stuns:", "turn:", "turns:"} {
+		if strings.HasPrefix(u, scheme) && len(u) > len(scheme) {
+			return true
+		}
+	}
+	return false
 }
 
 // Addr is the host:port bind address.
