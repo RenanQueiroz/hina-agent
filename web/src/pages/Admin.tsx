@@ -47,6 +47,8 @@ export function AdminPage() {
         </p>
       </Card>
 
+      <RuntimePanel />
+
       <Card className="p-4">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">Users</h2>
         {users.isLoading ? <Spinner /> : <UsersTable users={users.data ?? []} />}
@@ -55,6 +57,76 @@ export function AdminPage() {
       <LiveSessionsPanel />
       <LogsPanel />
     </div>
+  );
+}
+
+// RuntimePanel shows the local-inference backend: ONNX Runtime version/provider/
+// lib path and the TTS engine's load state + cold/warm synth latency (Phase 4).
+function RuntimePanel() {
+  const rt = useQuery({
+    queryKey: ["admin", "runtime"],
+    queryFn: api.adminRuntime,
+    refetchInterval: 5000,
+  });
+  const tts = rt.data?.tts;
+  const ort = tts?.runtime;
+  const status = !tts?.enabled
+    ? "disabled"
+    : tts?.available
+      ? tts.loaded
+        ? "loaded (warm)"
+        : "ready (idle)"
+      : "unavailable";
+  return (
+    <Card className="p-4">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">
+        Local TTS runtime
+      </h2>
+      {rt.isLoading ? (
+        <Spinner />
+      ) : (
+        <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-sm">
+          <dt className="text-zinc-500">Status</dt>
+          <dd>{status}</dd>
+          <dt className="text-zinc-500">ONNX Runtime</dt>
+          <dd>
+            {ort?.available ? (
+              `${ort.version} (${ort.provider})`
+            ) : (
+              <span className="text-zinc-400">{ort?.reason || "not linked"}</span>
+            )}
+          </dd>
+          <dt className="text-zinc-500">Library</dt>
+          <dd className="truncate font-mono text-xs">
+            {ort?.lib_path || <span className="text-zinc-400">—</span>}
+          </dd>
+          <dt className="text-zinc-500">Voice / Lang</dt>
+          <dd>
+            {tts?.voice || "—"} / {tts?.lang || "—"}
+          </dd>
+          <dt className="text-zinc-500">Cold load</dt>
+          <dd>{tts?.cold_load_ms ? `${tts.cold_load_ms} ms` : "—"}</dd>
+          <dt className="text-zinc-500">Last synth</dt>
+          <dd>{tts?.last_synth_ms ? `${tts.last_synth_ms} ms` : "—"}</dd>
+          <dt className="text-zinc-500">Synths / errors</dt>
+          <dd>
+            {tts?.synth_count ?? 0} / {tts?.error_count ?? 0}
+          </dd>
+          {tts?.reason && !tts.available && (
+            <>
+              <dt className="text-zinc-500">Reason</dt>
+              <dd className="text-amber-600 dark:text-amber-400">{tts.reason}</dd>
+            </>
+          )}
+          {tts?.last_error && (
+            <>
+              <dt className="text-zinc-500">Last error</dt>
+              <dd className="text-red-500">{tts.last_error}</dd>
+            </>
+          )}
+        </dl>
+      )}
+    </Card>
   );
 }
 

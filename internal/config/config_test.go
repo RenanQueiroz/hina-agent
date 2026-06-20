@@ -1,6 +1,58 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// TestValidateTTS locks the [tts] validation: non-negative steps/speed/threads and
+// a parseable idle_ttl; the helpers resolve defaults and the asset root.
+func TestValidateTTS(t *testing.T) {
+	c := Default()
+	c.TTS.Steps = -1
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative tts.steps must fail")
+	}
+	c = Default()
+	c.TTS.Speed = -0.5
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative tts.speed must fail")
+	}
+	c = Default()
+	c.TTS.Steps = 1000
+	if err := c.Validate(); err == nil {
+		t.Fatal("out-of-range tts.steps must fail")
+	}
+	c = Default()
+	c.TTS.Speed = 10
+	if err := c.Validate(); err == nil {
+		t.Fatal("out-of-range tts.speed must fail")
+	}
+	c = Default()
+	c.TTS.IdleTTL = "not-a-duration"
+	if err := c.Validate(); err == nil {
+		t.Fatal("invalid tts.idle_ttl must fail")
+	}
+	c = Default()
+	c.TTS.Steps, c.TTS.Speed, c.TTS.IdleTTL = 8, 1.05, "5m"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid tts config should pass: %v", err)
+	}
+
+	if got := c.TTS.IdleTTLOr(time.Minute); got != 5*time.Minute {
+		t.Fatalf("IdleTTLOr = %v, want 5m", got)
+	}
+	if got := (TTSConfig{}).IdleTTLOr(time.Minute); got != time.Minute {
+		t.Fatalf("empty IdleTTLOr = %v, want default 1m", got)
+	}
+	if got := (TTSConfig{}).AssetsRoot("/cache"); got != filepath.Join("/cache", "models") {
+		t.Fatalf("AssetsRoot default = %q", got)
+	}
+	if got := (TTSConfig{AssetsDir: "/custom"}).AssetsRoot("/cache"); got != "/custom" {
+		t.Fatalf("AssetsRoot override = %q, want /custom", got)
+	}
+}
 
 // TestValidateCompatBaseURL locks the fail-closed rule: the local openai-compat
 // provider requires an explicit base_url (never silently routes to cloud).

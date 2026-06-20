@@ -1,0 +1,1 @@
+{"tts_version":"test","ae":{"sample_rate":100,"base_chunk_size":2},"ttl":{"chunk_compress_factor":1,"latent_dim":2}}

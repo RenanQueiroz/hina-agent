@@ -10,6 +10,7 @@ import (
 
 	"github.com/RenanQueiroz/hina-agent/internal/audio"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
+	"github.com/RenanQueiroz/hina-agent/internal/tts"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -24,6 +25,7 @@ type Session struct {
 	pc             *webrtc.PeerConnection
 	log            *slog.Logger
 	sink           EventSink
+	tts            tts.Engine // optional local speech engine (nil/unavailable -> SpeakText rejected)
 
 	start  time.Time // monotonic reference for send timestamps / cursors
 	ctx    context.Context
@@ -49,6 +51,10 @@ type Session struct {
 	readyOnce    sync.Once   // onReady fires exactly once
 	onReady      func()      // called when the control channel opens (commit signal)
 	pendingTimer *time.Timer // rolls the session back if it never becomes ready
+
+	speakMu     sync.Mutex         // guards speakCancel + speakGen
+	speakCancel context.CancelFunc // cancels the in-flight spoken reply, if any
+	speakGen    uint64             // arrival generation: a speak only commits if it's still current
 }
 
 // maxControlBytes bounds a single events-channel control message. Control frames
@@ -71,7 +77,7 @@ func (s *Session) channelsOpen() bool {
 		a.ReadyState() == webrtc.DataChannelStateOpen
 }
 
-func newSession(sid, userID, conversationID string, pc *webrtc.PeerConnection, log *slog.Logger, sink EventSink) *Session {
+func newSession(sid, userID, conversationID string, pc *webrtc.PeerConnection, log *slog.Logger, sink EventSink, engine tts.Engine) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
 		id:             sid,
@@ -80,6 +86,7 @@ func newSession(sid, userID, conversationID string, pc *webrtc.PeerConnection, l
 		pc:             pc,
 		log:            log.With("session", sid, "user", userID),
 		sink:           sink,
+		tts:            engine,
 		start:          time.Now(),
 		ctx:            ctx,
 		cancel:         cancel,
@@ -268,6 +275,16 @@ func (s *Session) handleControlMessage(msg webrtc.DataChannelMessage) {
 			return
 		}
 		s.setMode(p.Mode)
+	case events.TypeSpeakText:
+		var p struct {
+			Text  string `json:"text"`
+			Voice string `json:"voice"`
+			Lang  string `json:"lang"`
+		}
+		if json.Unmarshal(e.Payload, &p) != nil {
+			return
+		}
+		s.speak(p.Text, tts.Options{Voice: p.Voice, Lang: p.Lang})
 	case events.TypeUserInterrupted:
 		var p struct {
 			Epoch         uint32 `json:"epoch"`
@@ -276,6 +293,7 @@ func (s *Session) handleControlMessage(msg webrtc.DataChannelMessage) {
 		if json.Unmarshal(e.Payload, &p) != nil {
 			return
 		}
+		s.cancelSpeak() // a barge-in also stops any in-flight spoken reply
 		s.out.interrupt(p.Epoch, p.PlayedSamples, s.nowMicros())
 	case events.TypePlaybackProgress:
 		var p struct {
@@ -291,8 +309,10 @@ func (s *Session) handleControlMessage(msg webrtc.DataChannelMessage) {
 }
 
 // setMode selects the outbound audio source. "idle" stops playback; "loopback"
-// echoes the decoded mic; "tone" plays the generated test tone.
+// echoes the decoded mic; "tone" plays the generated test tone. Any mode change
+// also cancels an in-flight spoken reply (its audio source is being replaced).
 func (s *Session) setMode(mode string) {
+	s.cancelSpeak()
 	switch mode {
 	case ModeIdle:
 		s.out.stop()
@@ -377,6 +397,7 @@ func (s *Session) Close() {
 	s.closed.Store(true)
 	s.commitMu.Unlock()
 	s.closeOnce.Do(func() {
+		s.cancelSpeak() // invalidate any pending speak so it can't start after teardown
 		s.cancel()
 		s.out.stop()
 		if err := s.pc.Close(); err != nil {

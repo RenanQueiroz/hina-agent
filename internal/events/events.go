@@ -50,6 +50,20 @@ const (
 	TypeUserInterrupted  = "UserInterrupted"
 )
 
+// Phase 4 local-TTS event types. TTSStarted/TTSCompleted bracket a spoken reply
+// (per conversation, alongside PlaybackStarted/Stopped on the audio path). The
+// RuntimeModel* types report the shared ONNX runtime's lazy-load / idle-unload
+// lifecycle and load failures — global (no conversation), for admin
+// observability of the local-inference backend.
+const (
+	TypeSpeakText            = "SpeakText" // client->server: speak this text into the live session
+	TypeTTSStarted           = "TTSStarted"
+	TypeTTSCompleted         = "TTSCompleted"
+	TypeRuntimeModelLoaded   = "RuntimeModelLoaded"
+	TypeRuntimeModelUnloaded = "RuntimeModelUnloaded"
+	TypeRuntimeModelError    = "RuntimeModelError"
+)
+
 // Event is the typed envelope. JSON field names are the wire contract; note
 // ConversationID serializes as "session_id" (the product-level "session").
 type Event struct {

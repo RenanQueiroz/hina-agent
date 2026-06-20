@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -20,8 +22,45 @@ type Config struct {
 	Agent    AgentConfig    `toml:"agent"`
 	LLM      LLMConfig      `toml:"llm"`
 	Realtime RealtimeConfig `toml:"realtime"`
+	TTS      TTSConfig      `toml:"tts"`
 	Paths    PathsConfig    `toml:"paths"`
 	Log      LogConfig      `toml:"log"`
+}
+
+// TTSConfig configures the local text-to-speech engine (Phase 4, Supertonic via
+// ONNX Runtime). It is off by default: local TTS needs the onnx-tagged build and
+// the downloaded model assets, so the default control-plane build leaves it
+// disabled and `hina doctor` reports it unavailable.
+type TTSConfig struct {
+	Enabled   bool    `toml:"enabled"`    // turn on local TTS (needs the onnx build + assets)
+	Voice     string  `toml:"voice"`      // default preset voice id, e.g. "M1"
+	Lang      string  `toml:"lang"`       // default language tag, e.g. "en"
+	Speed     float64 `toml:"speed"`      // default tempo multiplier (0 -> engine default)
+	Steps     int     `toml:"steps"`      // flow-matching denoise steps (0 -> engine default 8)
+	IdleTTL   string  `toml:"idle_ttl"`   // unload models after this idle duration, e.g. "5m"
+	AssetsDir string  `toml:"assets_dir"` // override the model/runtime asset root (default: cache dir)
+	Threads   int     `toml:"threads"`    // ORT intra-op CPU threads (0 -> ORT default)
+}
+
+// AssetsRoot resolves the local-inference asset root: the configured override, or
+// a models/ subdir of the given cache dir (model downloads belong in the cache).
+func (t TTSConfig) AssetsRoot(cacheDir string) string {
+	if t.AssetsDir != "" {
+		return t.AssetsDir
+	}
+	return filepath.Join(cacheDir, "models")
+}
+
+// IdleTTLOr parses IdleTTL, falling back to def when empty or invalid.
+func (t TTSConfig) IdleTTLOr(def time.Duration) time.Duration {
+	if t.IdleTTL == "" {
+		return def
+	}
+	d, err := time.ParseDuration(t.IdleTTL)
+	if err != nil || d < 0 {
+		return def
+	}
+	return d
 }
 
 // RealtimeConfig configures the WebRTC voice bridge (Phase 3). ICEServers is
@@ -158,6 +197,15 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("HINA_LLM_API_KEY"); v != "" {
 		c.LLM.APIKey = v
 	}
+	if v := os.Getenv("HINA_TTS_ENABLED"); v != "" {
+		c.TTS.Enabled = v == "1" || v == "true"
+	}
+	if v := os.Getenv("HINA_TTS_VOICE"); v != "" {
+		c.TTS.Voice = v
+	}
+	if v := os.Getenv("HINA_TTS_ASSETS_DIR"); v != "" {
+		c.TTS.AssetsDir = v
+	}
 	if v := os.Getenv("HINA_REALTIME_ICE_SERVERS"); v != "" {
 		// Env is the simple STUN path: a comma-separated URL list, each its own
 		// server with no credentials. TURN (which needs credentials) is config-file
@@ -234,6 +282,23 @@ func (c Config) Validate() error {
 	// sending conversation history to cloud OpenAI.
 	if c.LLM.Provider == "openai-compat" && c.LLM.BaseURL == "" {
 		return fmt.Errorf("llm.base_url is required when llm.provider=openai-compat (e.g. http://localhost:8080/v1); refusing to default to cloud OpenAI")
+	}
+	// Bounded ranges (0 = use the engine default) defend against a config typo
+	// driving an unbounded flow loop or a near-zero speed inflating the latent
+	// allocation. The engine clamps too, but failing closed at load is clearer.
+	if c.TTS.Steps != 0 && (c.TTS.Steps < 1 || c.TTS.Steps > 100) {
+		return fmt.Errorf("tts.steps %d out of range (1..100, or 0 for the default)", c.TTS.Steps)
+	}
+	if c.TTS.Speed != 0 && (c.TTS.Speed < 0.25 || c.TTS.Speed > 4.0) {
+		return fmt.Errorf("tts.speed %v out of range (0.25..4.0, or 0 for the default)", c.TTS.Speed)
+	}
+	if c.TTS.Threads < 0 {
+		return fmt.Errorf("tts.threads %d must be >= 0", c.TTS.Threads)
+	}
+	if c.TTS.IdleTTL != "" {
+		if d, err := time.ParseDuration(c.TTS.IdleTTL); err != nil || d < 0 {
+			return fmt.Errorf("tts.idle_ttl %q must be a non-negative duration (e.g. \"5m\")", c.TTS.IdleTTL)
+		}
 	}
 	for _, srv := range c.Realtime.ICEServers {
 		if len(srv.URLs) == 0 {

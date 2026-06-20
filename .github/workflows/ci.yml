@@ -107,6 +107,65 @@ jobs:
           if [ "$gone" != "1" ]; then echo "server process lingered after termination"; exit 1; fi
           echo "server stopped, no orphan"
 
+  onnx:
+    name: onnx build & test (${{ matrix.os }})
+    # The local-inference build links ONNX Runtime via CGo behind the `onnx` tag.
+    # It needs a C compiler but not the ORT library at build time (dlopen'd at
+    # runtime), so it compiles on the stock runners. The Linux/macOS jobs also
+    # download the pinned ORT 1.26.0 library and run the model load+run tests; the
+    # default control-plane build stays CGO_ENABLED=0 (see build-test).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26.x"
+      - name: Build (onnx tag)
+        run: go build -tags onnx ./...
+      - name: Vet (onnx tag)
+        run: go vet -tags onnx ./...
+      - name: Install pinned assets and run the ONNX + real-model tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Validate the binding against the pinned ORT 1.26.0 library on every
+          # supported runner, and the REAL Supertonic pipeline (the 4 graphs, voice
+          # vectors, tokenizer) on Linux via the actual `hina assets pull` install
+          # path (SHA256-verified). On platforms with no ORT 1.26.0 CPU build, the
+          # model tests skip; when a runtime IS provided, TestORTLoadsAndRunsModel
+          # FAILS (not skips) if it can't load — a regression can't hide behind a
+          # green skip.
+          arch="$(uname -m)"
+          if [ "${RUNNER_OS}-${arch}" = "Linux-x86_64" ]; then
+            export HINA_TTS_ASSETS_DIR="$RUNNER_TEMP/hina-assets"
+            CGO_ENABLED=0 go run ./cmd/hina assets pull
+            export ONNXRUNTIME_SHARED_LIBRARY_PATH="$(find "$HINA_TTS_ASSETS_DIR/ort" -type f -name 'libonnxruntime*' | head -1)"
+            export HINA_TTS_TEST_ASSETS="$HINA_TTS_ASSETS_DIR"
+            echo "Linux: running the trivial-ORT load test AND the real Supertonic pipeline test"
+          elif [ "${RUNNER_OS}-${arch}" = "macOS-arm64" ]; then
+            # Lighter: just the ORT library so the binding load/run test runs (the
+            # ~400 MB Supertonic models are exercised on the Linux job).
+            url="https://github.com/microsoft/onnxruntime/releases/download/v1.26.0/onnxruntime-osx-arm64-1.26.0.tgz"
+            sha="7a1280bbb1701ea514f71828765237e7896e0f2e1cd332f1f70dbd5c3e33aca3"
+            curl -sL "$url" -o /tmp/ort.tgz
+            echo "$sha  /tmp/ort.tgz" | shasum -a 256 -c -
+            tar -C /tmp -xzf /tmp/ort.tgz
+            export ONNXRUNTIME_SHARED_LIBRARY_PATH="/tmp/onnxruntime-osx-arm64-1.26.0/lib/libonnxruntime.1.26.0.dylib"
+            echo "macOS: running the trivial-ORT load test (Supertonic models validated on Linux)"
+          else
+            echo "No pinned ORT 1.26.0 CPU build for ${RUNNER_OS}-${arch}; the ONNX model tests will skip."
+          fi
+          go test -tags onnx ./internal/onnx/... ./internal/tts/...
+
   cross-compile:
     name: cross-compile targets
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

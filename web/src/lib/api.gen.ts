@@ -112,6 +112,41 @@ export interface RTCStats {
   sessions: RTCSessionStats[];
 }
 /**
+ * AdminRuntime is the GET /admin/runtime response: local-inference backend status.
+ */
+export interface AdminRuntime {
+  llm_provider: string;
+  tts: TTSRuntime;
+}
+/**
+ * TTSRuntime is the local TTS engine + ONNX runtime status for the admin view.
+ */
+export interface TTSRuntime {
+  enabled: boolean;
+  available: boolean;
+  loaded: boolean; // models currently resident (warm)
+  voice: string;
+  lang: string;
+  steps: number /* int */;
+  reason?: string; // why unavailable
+  runtime: ORTRuntime;
+  cold_load_ms: number /* int64 */; // last cold model-load latency
+  last_synth_ms: number /* int64 */; // last per-sentence synth latency
+  synth_count: number /* int64 */;
+  error_count: number /* int64 */;
+  last_error?: string;
+}
+/**
+ * ORTRuntime is the ONNX Runtime library status (version/provider/lib path).
+ */
+export interface ORTRuntime {
+  available: boolean;
+  version?: string;
+  provider?: string;
+  lib_path?: string;
+  reason?: string;
+}
+/**
  * AdminUser is a user row in the admin list.
  */
 export interface AdminUser {

@@ -142,6 +142,54 @@ export const TypePlaybackStopped = "PlaybackStopped";
  */
 export const TypeUserInterrupted = "UserInterrupted";
 /**
+ * Phase 4 local-TTS event types. TTSStarted/TTSCompleted bracket a spoken reply
+ * (per conversation, alongside PlaybackStarted/Stopped on the audio path). The
+ * RuntimeModel* types report the shared ONNX runtime's lazy-load / idle-unload
+ * lifecycle and load failures — global (no conversation), for admin
+ * observability of the local-inference backend.
+ */
+export const TypeSpeakText = "SpeakText"; // client->server: speak this text into the live session
+/**
+ * Phase 4 local-TTS event types. TTSStarted/TTSCompleted bracket a spoken reply
+ * (per conversation, alongside PlaybackStarted/Stopped on the audio path). The
+ * RuntimeModel* types report the shared ONNX runtime's lazy-load / idle-unload
+ * lifecycle and load failures — global (no conversation), for admin
+ * observability of the local-inference backend.
+ */
+export const TypeTTSStarted = "TTSStarted";
+/**
+ * Phase 4 local-TTS event types. TTSStarted/TTSCompleted bracket a spoken reply
+ * (per conversation, alongside PlaybackStarted/Stopped on the audio path). The
+ * RuntimeModel* types report the shared ONNX runtime's lazy-load / idle-unload
+ * lifecycle and load failures — global (no conversation), for admin
+ * observability of the local-inference backend.
+ */
+export const TypeTTSCompleted = "TTSCompleted";
+/**
+ * Phase 4 local-TTS event types. TTSStarted/TTSCompleted bracket a spoken reply
+ * (per conversation, alongside PlaybackStarted/Stopped on the audio path). The
+ * RuntimeModel* types report the shared ONNX runtime's lazy-load / idle-unload
+ * lifecycle and load failures — global (no conversation), for admin
+ * observability of the local-inference backend.
+ */
+export const TypeRuntimeModelLoaded = "RuntimeModelLoaded";
+/**
+ * Phase 4 local-TTS event types. TTSStarted/TTSCompleted bracket a spoken reply
+ * (per conversation, alongside PlaybackStarted/Stopped on the audio path). The
+ * RuntimeModel* types report the shared ONNX runtime's lazy-load / idle-unload
+ * lifecycle and load failures — global (no conversation), for admin
+ * observability of the local-inference backend.
+ */
+export const TypeRuntimeModelUnloaded = "RuntimeModelUnloaded";
+/**
+ * Phase 4 local-TTS event types. TTSStarted/TTSCompleted bracket a spoken reply
+ * (per conversation, alongside PlaybackStarted/Stopped on the audio path). The
+ * RuntimeModel* types report the shared ONNX runtime's lazy-load / idle-unload
+ * lifecycle and load failures — global (no conversation), for admin
+ * observability of the local-inference backend.
+ */
+export const TypeRuntimeModelError = "RuntimeModelError";
+/**
  * Event is the typed envelope. JSON field names are the wire contract; note
  * ConversationID serializes as "session_id" (the product-level "session").
  */

@@ -22,6 +22,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/logbuf"
 	"github.com/RenanQueiroz/hina-agent/internal/rtc"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
+	"github.com/RenanQueiroz/hina-agent/internal/tts"
 	"github.com/RenanQueiroz/hina-agent/internal/wire"
 	webui "github.com/RenanQueiroz/hina-agent/web"
 )
@@ -34,6 +35,7 @@ type Server struct {
 	auth     *auth.Manager
 	provider llm.Provider
 	rtc      *rtc.Manager
+	tts      tts.Engine
 	logs     *logbuf.Buffer
 	log      *slog.Logger
 	ready    atomic.Bool
@@ -83,6 +85,10 @@ func (s *Server) SetReady(v bool) { s.ready.Store(v) }
 // When unset, the realtime routes respond 503.
 func (s *Server) SetRealtime(m *rtc.Manager) { s.rtc = m }
 
+// SetTTS installs the local TTS engine (post-construction). May be nil (TTS off);
+// the admin runtime view reports it as disabled/unavailable accordingly.
+func (s *Server) SetTTS(e tts.Engine) { s.tts = e }
+
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
@@ -105,6 +111,8 @@ func (s *Server) routes() http.Handler {
 
 	// WebRTC signaling (mirrors OpenAI's application/sdp /realtime/calls).
 	mux.Handle("POST /api/v1/realtime/calls", s.requireUser(s.handleRealtimeCall))
+	// Speak text into the caller's active live session (server-driven TTS).
+	mux.Handle("POST /api/v1/realtime/speak", s.requireUser(s.handleRealtimeSpeak))
 
 	// Admin routes.
 	mux.Handle("GET /api/v1/admin/users", s.requireAdmin(s.handleListUsers))

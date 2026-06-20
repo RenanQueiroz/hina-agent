@@ -10,8 +10,10 @@ require (
 	github.com/pion/sdp/v3 v3.0.18
 	github.com/pion/webrtc/v4 v4.2.15
 	github.com/tphakala/go-audio-resampler v1.4.0
+	github.com/yalue/onnxruntime_go v1.31.0
 	golang.org/x/crypto v0.53.0
 	golang.org/x/sys v0.46.0
+	golang.org/x/text v0.38.0
 	modernc.org/sqlite v1.52.0
 )
 

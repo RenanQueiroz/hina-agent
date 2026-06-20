@@ -1,8 +1,10 @@
 # Phase 4 — Local TTS (Supertonic) + ONNX runtime plumbing + idle-unload manager
 
-Status: ready after Phases 2 + 3.
+Status: **implemented.** ONNX runtime (build-tag isolated), idle-unload manager, asset downloader, Supertonic adapter, and the WebRTC TTS speak path are in the tree (`internal/onnx`, `internal/tts`, `internal/assets`). Validated on Linux/macOS via the `onnx` CI job + the model load/run tests; real synthesis confirmed end to end.
 Depends on: Phase 2 (a turn to speak), Phase 3 (audio-out transport).
 Unblocks: Phase 5 (shares the ORT runtime/manager), Phase 6 (TTS in the live loop).
+
+> **ORT version correction (recorded during implementation):** the `yalue/onnxruntime_go` binding's release tag is decoupled from the ONNX Runtime version. Binding **v1.31.0 speaks ORT C API v26**, so it is paired with an **ORT 1.26.0** shared library — NOT 1.31.x (which does not exist). 1.26.0 is also the last release with CPU builds for all of linux-x64, osx-arm64, and win-x64. The pins live in `internal/assets` (ORT release + the Supertonic HF revision, all SHA256-verified). See the corrected note in [`research-findings.md` B1](research-findings.md#b1-onnx-runtime-go-binding--green).
 
 ## Goal
 
@@ -13,7 +15,7 @@ Library/version/model facts are fixed in [`research-findings.md` B1–B2](resear
 ## Scope
 
 ### In
-1. **ORT runtime foundation**: `yalue/onnxruntime_go` pinned `v1.31.0` + bundled ORT `1.31.x` shared libs, loaded via `SetSharedLibraryPath` from the **app-managed runtime dir** (never the system path). CGo isolated behind a build tag (`//go:build onnx`) so cloud-only/headless builds stay CGo-free. Asset download/pin/checksum/extract into the runtime dir; ORT version + provider + lib path surfaced in `hina doctor` and the admin UI.
+1. **ORT runtime foundation**: `yalue/onnxruntime_go` pinned `v1.31.0` + bundled ORT **`1.26.0`** shared libs (the binding's C API v26 pairs with ORT 1.26.0, not 1.31.x — see the correction above), loaded via `SetSharedLibraryPath` from the **app-managed runtime dir** (never the system path). CGo isolated behind a build tag (`//go:build onnx`) so cloud-only/headless builds stay CGo-free. Asset download/pin/checksum/extract into the runtime dir; ORT version + provider + lib path surfaced in `hina doctor` and the admin UI.
 2. **Runtime/idle-unload manager** (shared by TTS now, ASR in Phase 5): lazy-load a model on first need, keep one shared instance or a bounded worker pool (benchmark-driven), unload after an admin-configured idle TTL, expose load/warmup/synth-latency/failure events. Mirrors V1's idle-unload philosophy but in-process for ONNX (vs. V1's HTTP servers).
 3. **Supertonic Go adapter**: port the official `supertone-inc/supertonic` Go example. Pure-Go text prep (NFKD via `golang.org/x/text`, codepoint→token-ID, no espeak-ng/misaki); the 4 ONNX graphs (`text_encoder`, `duration_predictor`, `vector_estimator` ~8 flow-matching steps, `vocoder`); per-voice style vectors; **44.1 kHz** mono output. Synthesize through an **internal Go API** (no local HTTP TTS hop), streaming sentence-by-sentence.
 4. **Wire to audio-out**: emit synthesized 44.1 kHz frames into the Phase 3 PCM-over-datachannel path (resample 44.1→target only if needed; the AudioWorklet can also resample). Sentence-eager splitting (port V1's decimal-aware splitter so "3.14" isn't read as "three"). `TTSStarted`/`PlaybackStarted` events.
@@ -30,7 +32,7 @@ Library/version/model facts are fixed in [`research-findings.md` B1–B2](resear
 Write the adapter and runtime manager cross-platform now; the ORT DLL loading path is coded (with the Windows `onnxruntime.dll` discovery via `SetSharedLibraryPath`) but its **hands-on validation is Phase 11**. The build-tagged CGo means the default Windows control-plane build still has no compiler dependency; the `onnx`-tagged build is what Phase 11 validates on Windows.
 
 ## Work breakdown
-1. **ORT bring-up**: install Go toolchain + ORT 1.31.x libs in the dev/CI environment; `yalue` binding smoke (load a trivial ONNX, run it) on macOS/Linux; the build-tag split for CGo isolation.
+1. **ORT bring-up**: install Go toolchain + ORT 1.26.0 libs in the dev/CI environment; `yalue` binding smoke (load a trivial ONNX, run it) on macOS/Linux; the build-tag split for CGo isolation.
 2. **Asset manager**: pin Supertonic + ORT to specific commits/releases, download + checksum into the runtime dir, surface in doctor.
 3. **Runtime manager**: lazy-load/idle-TTL/shared-instance/worker-pool + lifecycle events; design it model-agnostic so ASR slots in.
 4. **Supertonic adapter**: text prep → 4-graph pipeline → 44.1 kHz frames; voice/style-vector selection; streaming by sentence.

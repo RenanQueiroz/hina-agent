@@ -229,3 +229,71 @@ describe("LiveSession interrupt gating", () => {
     expect(sent.payload.played_samples).toBe(480);
   });
 });
+
+describe("LiveSession playback stop", () => {
+  it("keeps the gate open (no flush) on normal completion, closes+flushes on truncation", () => {
+    const s = new LiveSession(() => {}) as unknown as {
+      node: { port: { postMessage: ReturnType<typeof vi.fn> } };
+      gate: { epoch: number | null; lastSeq: number };
+      onControl: (data: string) => void;
+    };
+    s.node = { port: { postMessage: vi.fn() } };
+    s.gate = { epoch: 3, lastSeq: 0 };
+    const stop = (truncated: boolean) =>
+      JSON.stringify({ type: "PlaybackStopped", payload: { truncated } });
+
+    // Normal completion: gate stays OPEN so a final in-flight frame for this epoch
+    // (delivered just after the stop on the unreliable channel) isn't dropped; no flush.
+    s.onControl(stop(false));
+    expect(s.gate.epoch).toBe(3);
+    expect(s.node.port.postMessage).not.toHaveBeenCalledWith({ type: "flush" });
+
+    // Truncation (barge-in / explicit stop): close the gate and drop buffered audio.
+    s.node.port.postMessage.mockClear();
+    s.onControl(stop(true));
+    expect(s.gate.epoch).toBe(null);
+    expect(s.node.port.postMessage).toHaveBeenCalledWith({ type: "flush" });
+  });
+});
+
+describe("LiveSession TTS completion", () => {
+  it("surfaces a truncated reply from TTSCompleted into state", () => {
+    const states: Array<{ replyTruncated?: boolean }> = [];
+    const s = new LiveSession((st) => states.push(st)) as unknown as {
+      onControl: (data: string) => void;
+    };
+    s.onControl(JSON.stringify({ type: "TTSCompleted", payload: { epoch: 1, truncated: true } }));
+    expect(states.at(-1)?.replyTruncated).toBe(true);
+
+    // A fresh playback clears the flag.
+    s.onControl(JSON.stringify({ type: "PlaybackStarted", payload: { epoch: 2, source: "tts" } }));
+    expect(states.at(-1)?.replyTruncated).toBe(false);
+  });
+});
+
+describe("LiveSession speak", () => {
+  it("sends a SpeakText control envelope with the text/voice/lang", () => {
+    const s = new LiveSession(() => {}) as unknown as {
+      eventsDC: { readyState: string; send: ReturnType<typeof vi.fn> };
+      speak: (text: string, voice?: string, lang?: string) => void;
+    };
+    s.eventsDC = { readyState: "open", send: vi.fn() };
+
+    s.speak("Hello there.", "M1", "en");
+    expect(s.eventsDC.send).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(s.eventsDC.send.mock.calls[0][0] as string);
+    expect(sent.type).toBe("SpeakText");
+    expect(sent.source).toBe("client");
+    expect(sent.payload).toEqual({ text: "Hello there.", voice: "M1", lang: "en" });
+  });
+
+  it("is a no-op when the control channel is not open", () => {
+    const s = new LiveSession(() => {}) as unknown as {
+      eventsDC: { readyState: string; send: ReturnType<typeof vi.fn> };
+      speak: (text: string) => void;
+    };
+    s.eventsDC = { readyState: "connecting", send: vi.fn() };
+    s.speak("hi");
+    expect(s.eventsDC.send).not.toHaveBeenCalled();
+  });
+});

@@ -9,6 +9,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/rtc"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
+	"github.com/RenanQueiroz/hina-agent/internal/tts"
 	"github.com/RenanQueiroz/hina-agent/internal/wire"
 )
 
@@ -80,6 +81,42 @@ func (s *Server) handleRealtimeCall(w http.ResponseWriter, r *http.Request) {
 	if _, werr := io.WriteString(w, answer); werr != nil {
 		s.log.Warn("realtime answer not delivered; rolling back session", "session", sessionID, "err", werr)
 		s.rtc.CloseSession(sessionID)
+	}
+}
+
+// handleRealtimeSpeak synthesizes text into the caller's active live session
+// (the text-driven voice demo path: a typed message spoken aloud over WebRTC). It
+// is a no-op-ish 409 when the caller has no active call, 503 when realtime is off.
+func (s *Server) handleRealtimeSpeak(w http.ResponseWriter, r *http.Request) {
+	u, _ := auth.UserFrom(r.Context())
+	if s.rtc == nil {
+		writeErr(w, http.StatusServiceUnavailable, "realtime is not enabled")
+		return
+	}
+	var body struct {
+		Text  string `json:"text"`
+		Voice string `json:"voice"`
+		Lang  string `json:"lang"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil || strings.TrimSpace(body.Text) == "" {
+		writeErr(w, http.StatusBadRequest, "text is required")
+		return
+	}
+	if s.tts == nil || !s.tts.Available() {
+		writeErr(w, http.StatusServiceUnavailable, "local TTS is unavailable")
+		return
+	}
+	switch err := s.rtc.Speak(u.ID, body.Text, tts.Options{Voice: body.Voice, Lang: body.Lang}); {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]string{"status": "speaking"})
+	case errors.Is(err, rtc.ErrNoSession):
+		writeErr(w, http.StatusConflict, "no active live session; start one first")
+	case errors.Is(err, tts.ErrUnavailable):
+		writeErr(w, http.StatusServiceUnavailable, "local TTS is unavailable")
+	default:
+		// A synchronous rejection (too long, unknown voice, too many sentences) is a
+		// client error, not a server failure.
+		writeErr(w, http.StatusBadRequest, err.Error())
 	}
 }
 

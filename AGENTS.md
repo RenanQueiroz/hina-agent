@@ -24,7 +24,7 @@ If you're unsure whether a doc is affected, check it. When you finish a task, it
 
 A server-first, web-first, **multi-user voice and text agent** (V2), cross-platform from commit 1 (Windows 11 x64, macOS Apple Silicon, Linux x86_64). One Go binary (`cmd/hina`) serves a versioned JSON/SSE API and an embedded React/Vite web client. Local **and** cloud STT-LLM-TTS, Docker `sbx` sandboxing, per-user secrets, and callable-agent Automations land across a phased roadmap.
 
-Current state: **Phases 1–3 complete** — control plane, streaming text chat, and a pure-Go WebRTC audio bridge. See `README.md` for the per-phase feature breakdown and `plans/roadmap.md` for what's next.
+Current state: **Phases 1–4 complete** — control plane, streaming text chat, a pure-Go WebRTC audio bridge, and local TTS (Supertonic via ONNX Runtime behind the `onnx` build tag). See `README.md` for the per-phase feature breakdown and `plans/roadmap.md` for what's next.
 
 ## Repository map
 
@@ -44,11 +44,14 @@ internal/
   agent/             Builds model context from a conversation's canonical turns
   wire/              JSON DTOs exchanged with the web client (source for generated TS)
   audio/             Resample (48k→16k/24k), PCM↔float32, tone generator, binary audio-frame framing
-  rtc/               Pion WebRTC bridge: session lifecycle, inbound mic pipeline, outbound PCM pacer, control events, metrics
+  rtc/               Pion WebRTC bridge: session lifecycle, inbound mic pipeline, outbound PCM pacer, control events, metrics, TTS speak
+  onnx/              ONNX Runtime abstraction (Backend/Session/Tensor) + lazy-load/idle-unload Lifecycle; ORT binding behind the `onnx` build tag, CGo-free stub by default
+  tts/               Supertonic 3 TTS port: text prep + tokenizer, sentence splitter, voice vectors, the 4-graph pipeline (CGo-free; runs on internal/onnx)
+  assets/            Pinned local-inference downloads (ORT + Supertonic models) with SHA256 verify/extract; drives `hina assets`
 web/                 React 19 + Vite + Tailwind client (embedded into the binary via web/dist)
   src/lib/*.gen.ts   Generated from internal/wire + internal/events by tygo — DO NOT EDIT by hand
 plans/               Design docs: roadmap.md, hina-agent-plan.md, research-findings.md, phase-NN-*.md
-.github/workflows/   ci.yml (build/test matrix, cross-compile, web, gen-check, e2e) + codeql.yml
+.github/workflows/   ci.yml (build/test matrix, cross-compile, web, gen-check, e2e, onnx) + codeql.yml
 ```
 
 ## Build, test, and verify
@@ -66,6 +69,11 @@ make cross    # cross-compile windows/amd64, darwin/arm64, linux/amd64 locally
 make gen-ts   # regenerate web/src/lib/*.gen.ts from the Go DTOs (tygo)
 make doctor   # build + run hina doctor
 
+# local-inference build (Phase 4): ONNX Runtime via CGo behind the `onnx` tag
+make build-onnx  # CGO_ENABLED=1 go build -tags onnx (needs a C compiler; no ORT lib at build time)
+make vet-onnx
+make test-onnx   # model tests skip unless ONNXRUNTIME_SHARED_LIBRARY_PATH points at an ORT 1.26.0 lib
+
 # web (run from repo root with --prefix, or cd web)
 npm --prefix web ci
 npm --prefix web run typecheck
@@ -78,15 +86,16 @@ npm --prefix web run e2e      # Playwright (CI-only by default; needs a running 
 **Before committing**, run the checks that match what you touched. For a substantive change, the full local gauntlet (this is roughly what CI enforces) is:
 
 1. `gofmt`/`go vet` clean, `go test ./...` green.
-2. `go test -race ./...` (at least the concurrency-heavy packages: `rtc`, `audio`, `httpapi`, `events`, `store`).
+2. `go test -race ./...` (at least the concurrency-heavy packages: `rtc`, `audio`, `httpapi`, `events`, `store`, `onnx`, `tts`, `assets`).
 3. `make cross` — every Tier-1 target still compiles (Windows + macOS included).
-4. Web: `typecheck`, `test`, `build` all green.
-5. If you changed `internal/wire` or `internal/events`: `make gen-ts` and commit the regenerated `web/src/lib/*.gen.ts` (CI fails on drift).
-6. Smoke: `hina migrate` up / `down all` / up, and `hina doctor --json`.
+4. If you touched anything CGo/ONNX-tagged: `make build-onnx` + `make vet-onnx`, and `make test-onnx` (provide an ORT 1.26.0 lib via `ONNXRUNTIME_SHARED_LIBRARY_PATH` to exercise the model tests rather than skip them).
+5. Web: `typecheck`, `test`, `build` all green.
+6. If you changed `internal/wire` or `internal/events`: `make gen-ts` and commit the regenerated `web/src/lib/*.gen.ts` (CI fails on drift).
+7. Smoke: `hina migrate` up / `down all` / up, `hina doctor --json`, and `hina assets status`.
 
 ## Project invariants (do not break these)
 
-- **CGo-free control plane.** No `import "C"`, no dependency that needs a C toolchain, in the default build. Native ONNX/voice adapters arrive later behind a build tag with their own CI job. This is what keeps Windows/macOS builds compiler-free — protect it.
+- **CGo-free control plane.** No `import "C"`, no dependency that needs a C toolchain, in the *default* build. The ONNX Runtime binding is the one CGo dependency, and it is strictly isolated behind the `onnx` build tag (`internal/onnx/backend_onnx.go`); the default build compiles the CGo-free stub. Never let a CGo import leak into a non-tagged file, and keep the stub in lockstep with the real backend's exported surface. This is what keeps Windows/macOS default builds compiler-free — protect it.
 - **Cross-platform from day 1.** Any OS-specific primitive ships a Windows *and* Unix implementation when first written, via `internal/platform` `_windows.go`/`_unix.go` build-tag files. Features that need a Windows host to validate are *built now, validated in Phase 11* — don't delete the Windows path because you can't test it locally.
 - **The wire contract is generated, not hand-written.** Edit `internal/wire` / `internal/events`, then `make gen-ts`. Never hand-edit `web/src/lib/*.gen.ts`.
 - **The event envelope is fixed in one place.** All server→client events use the `internal/events` envelope; the same shape flows over SSE and the WebRTC datachannel. Add new event *types* there.

@@ -20,6 +20,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/logbuf"
 	"github.com/RenanQueiroz/hina-agent/internal/rtc"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
+	"github.com/RenanQueiroz/hina-agent/internal/tts"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -233,6 +234,86 @@ func TestRealtimeCallForeignConversation403(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status=%d, want 403", resp.StatusCode)
+	}
+}
+
+// fakeTTSEngine reports a fixed availability; Synthesize is never reached in the
+// status tests (there is no active live session), so it just satisfies Engine.
+type fakeTTSEngine struct{ available bool }
+
+func (e fakeTTSEngine) Synthesize(context.Context, string, tts.Options) (*tts.Stream, error) {
+	return nil, tts.ErrUnavailable
+}
+func (e fakeTTSEngine) Available() bool    { return e.available }
+func (e fakeTTSEngine) Status() tts.Status { return tts.Status{Available: e.available} }
+func (e fakeTTSEngine) Close() error       { return nil }
+
+// speakServer builds a server wired with a real (empty) WebRTC manager and the
+// given TTS engine, plus a logged-in admin client.
+func speakServer(t *testing.T, engine tts.Engine) (*httptest.Server, *http.Client) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	bus := events.NewBus(st)
+	srv := New(config.Default(), st, bus, auth.NewManager(st, false),
+		llm.NewMockProvider(), logbuf.New(100), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mgr, err := rtc.NewManager(rtc.Config{TTS: engine, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, bus)
+	if err != nil {
+		t.Fatalf("rtc manager: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+	srv.SetRealtime(mgr)
+	srv.SetTTS(engine)
+	srv.SetReady(true)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	boot, err := auth.EnsureAdmin(ctx, st)
+	if err != nil || !boot.Created {
+		t.Fatalf("bootstrap admin: %v", err)
+	}
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	postJSON(t, client, ts.URL+"/api/v1/auth/login",
+		map[string]string{"username": "admin", "password": boot.Password}, nil)
+	return ts, client
+}
+
+func postCode(t *testing.T, c *http.Client, url, body string) int {
+	t.Helper()
+	resp, err := c.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+// TestRealtimeSpeakStatuses checks the speak endpoint's status mapping: a
+// synchronous rejection is a client error (not a 200), and an unavailable engine
+// is a 503.
+func TestRealtimeSpeakStatuses(t *testing.T) {
+	// Available TTS, no active live session -> 409; empty text -> 400.
+	ts, client := speakServer(t, fakeTTSEngine{available: true})
+	url := ts.URL + "/api/v1/realtime/speak"
+	if c := postCode(t, client, url, `{"text":"hello"}`); c != http.StatusConflict {
+		t.Fatalf("speak with no active session = %d, want 409", c)
+	}
+	if c := postCode(t, client, url, `{"text":""}`); c != http.StatusBadRequest {
+		t.Fatalf("speak with empty text = %d, want 400", c)
+	}
+
+	// Unavailable TTS -> 503.
+	ts2, client2 := speakServer(t, fakeTTSEngine{available: false})
+	if c := postCode(t, client2, ts2.URL+"/api/v1/realtime/speak", `{"text":"hi"}`); c != http.StatusServiceUnavailable {
+		t.Fatalf("speak with unavailable TTS = %d, want 503", c)
 	}
 }
 

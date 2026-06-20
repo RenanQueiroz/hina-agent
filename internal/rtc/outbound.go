@@ -27,6 +27,14 @@ const (
 // the header plus OutputFrameSamples s16 samples).
 var maxBufferedBytes = uint64(maxBufferedFrames * audio.EncodedAudioFrameLen(audio.OutputFrameSamples))
 
+// outboundDC is the subset of *webrtc.DataChannel the pacer needs. An interface so
+// the backpressure/drain path is unit-testable with a fake datachannel.
+type outboundDC interface {
+	BufferedAmount() uint64
+	ReadyState() webrtc.DataChannelState
+	Send([]byte) error
+}
+
 // outbound is the server→browser PCM pipeline: a paced writer that pulls frames
 // from the active Source, frames them with a binary header, and sends them on
 // the unreliable audio datachannel. It also holds the playback cursor reported
@@ -35,12 +43,13 @@ type outbound struct {
 	s *Session
 
 	mu      sync.Mutex
-	dc      *webrtc.DataChannel
+	dc      outboundDC
 	source  Source
 	running bool
 	cancel  context.CancelFunc
 	epoch   uint32 // bumped on every (re)start; stamped into each frame
 	sent    int64  // samples actually sent this epoch (cursor upper bound)
+	dropped int64  // frames dropped for backpressure this epoch (audio not delivered)
 
 	// cursor + RTT reported by the browser's AudioWorklet.
 	playedSamples int64
@@ -55,7 +64,7 @@ const samplesPerMs = audio.OutputSampleRate / 1000
 func newOutbound(s *Session) *outbound { return &outbound{s: s} }
 
 // attach records the audio datachannel once the browser opens it.
-func (o *outbound) attach(dc *webrtc.DataChannel) {
+func (o *outbound) attach(dc outboundDC) {
 	o.mu.Lock()
 	o.dc = dc
 	o.mu.Unlock()
@@ -77,6 +86,7 @@ func (o *outbound) start(src Source) uint32 {
 	o.playedSamples = 0
 	o.playedMs = 0
 	o.sent = 0
+	o.dropped = 0
 	o.s.metrics.setCursor(0, 0)
 	if o.running {
 		o.mu.Unlock()
@@ -90,9 +100,11 @@ func (o *outbound) start(src Source) uint32 {
 	return epoch
 }
 
-// stop halts the pacer and clears the source, emitting PlaybackStopped with the
-// last reported cursor. Safe to call when already stopped.
-func (o *outbound) stop() { o.halt("stopped", false, 0) }
+// stop halts the pacer and clears the source. It is a TRUNCATING stop (an
+// explicit idle/mode-switch/teardown, not a natural end), so the browser drops
+// any still-buffered audio and closes its playback gate. Safe to call when
+// already stopped. Only a fully-drained TTS completion uses truncated=false.
+func (o *outbound) stop() { o.halt("stopped", true, 0) }
 
 // interrupt is the barge-in path: record the client's final cursor for the
 // active epoch (sanitized), then stop immediately and report that cursor as the
@@ -106,34 +118,37 @@ func (o *outbound) interrupt(epoch uint32, playedSamples, nowMicros int64) {
 		return
 	}
 	o.recordCursor(epoch, playedSamples, 0, nowMicros)
-	if o.halt("interrupt", true, epoch) {
+	if ok, _ := o.halt("interrupt", true, epoch); ok {
 		o.s.metrics.markInterrupt()
 	}
 }
 
 // halt stops the pacer and clears the source, emitting PlaybackStopped with the
 // last cursor. When expectEpoch is non-zero it acts only if that epoch is still
-// the active one. It returns whether it actually stopped a running playback.
-func (o *outbound) halt(reason string, truncated bool, expectEpoch uint32) bool {
+// the active one. It returns whether it actually stopped a running playback, plus
+// the number of frames dropped during that epoch (captured under the lock so a
+// concurrent restart can't reset it between halt and the caller's read).
+func (o *outbound) halt(reason string, truncated bool, expectEpoch uint32) (wasRunning bool, dropped int64) {
 	o.mu.Lock()
 	if expectEpoch != 0 && expectEpoch != o.epoch {
 		o.mu.Unlock()
-		return false // stale: the active playback has since advanced
+		return false, 0 // stale: the active playback has since advanced
 	}
-	wasRunning := o.running
+	wasRunning = o.running
 	cancel := o.cancel
 	o.cancel = nil
 	o.running = false
 	o.source = nil
 	playedMs := o.playedMs
 	playedSamples := o.playedSamples
+	dropped = o.dropped
 	o.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
 	if !wasRunning && !truncated {
-		return false // nothing was playing and this isn't an explicit barge-in
+		return false, dropped // nothing was playing and this isn't an explicit barge-in
 	}
 	o.s.emit(events.TypePlaybackStopped, map[string]any{
 		"reason":         reason,
@@ -141,17 +156,19 @@ func (o *outbound) halt(reason string, truncated bool, expectEpoch uint32) bool 
 		"cursor_ms":      playedMs,
 		"played_samples": playedSamples,
 	})
-	return wasRunning
+	return wasRunning, dropped
 }
 
-// feedLoopback forwards decoded mic PCM (24 kHz) to the active source. Only the
-// loopback source consumes it; for the tone source (or idle) it is dropped.
+// feedLoopback forwards decoded mic PCM (24 kHz) to the active source IFF it is
+// the loopback source. A TTS or tone source must never receive mic audio — doing
+// so would mix live mic into synthesized/generated playback and grow the buffer
+// with real-time audio — so anything other than the loopback source drops it.
 func (o *outbound) feedLoopback(samples []float32) {
 	o.mu.Lock()
 	src := o.source
 	o.mu.Unlock()
-	if src != nil {
-		src.Feed(samples)
+	if lb, ok := src.(*loopbackSource); ok {
+		lb.Feed(samples)
 	}
 }
 
@@ -187,6 +204,18 @@ func (o *outbound) recordCursor(epoch uint32, playedSamples, ackSendMicros, nowM
 	}
 	o.mu.Unlock()
 	o.s.metrics.setCursor(playedMs, rtt)
+}
+
+// recordDrop counts one undelivered frame against epoch, but only if epoch is
+// still the active one — so a source switch between the pacer capturing epoch and
+// here can't charge the new epoch for an old frame (and halt captures the count
+// under the same lock, so it can't be reset out from under a completion read).
+func (o *outbound) recordDrop(epoch uint32) {
+	o.mu.Lock()
+	if epoch == o.epoch {
+		o.dropped++
+	}
+	o.mu.Unlock()
 }
 
 // mode reports the active source name, or ModeIdle when stopped.
@@ -230,19 +259,25 @@ func (o *outbound) pace(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			// Drop if sending this frame WOULD push the queue past the budget, so
-			// buffered audio never exceeds maxBufferedBytes (a plain > check could
-			// still admit one more frame at the threshold).
+			// ALWAYS pull a frame from the source, even when we're about to drop it for
+			// backpressure: a finite source (TTS) must keep draining so its completion
+			// (ttsSource.Done) is reached under a slow/stuck-but-open channel rather
+			// than hanging. The send — not the consume — is what backpressure skips.
+			real := src.Next(frame)
+			// Drop the SEND if it would push the queue past the budget, so buffered
+			// audio never exceeds maxBufferedBytes (a plain > check could still admit
+			// one more frame at the threshold). The frame is already consumed.
 			if dc.BufferedAmount()+uint64(len(msg)) > maxBufferedBytes {
 				o.s.metrics.incDropped()
+				o.recordDrop(epoch) // this epoch's audio is now incomplete (frame undelivered)
 				continue
 			}
-			real := src.Next(frame)
 			seq++
 			sendMicros := o.s.nowMicros()
 			n := audio.EncodeAudioFrame(msg, seq, epoch, sendMicros, frame)
 			if err := dc.Send(msg[:n]); err != nil {
 				o.s.log.Debug("rtc: send audio frame", "err", err)
+				o.recordDrop(epoch) // consumed but not delivered -> this epoch's audio is incomplete
 				continue
 			}
 			o.s.metrics.addOut(uint64(n))

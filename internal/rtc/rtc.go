@@ -16,6 +16,7 @@ import (
 	"log/slog"
 
 	"github.com/RenanQueiroz/hina-agent/internal/events"
+	"github.com/RenanQueiroz/hina-agent/internal/tts"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -30,11 +31,14 @@ const (
 )
 
 // Outbound source modes, selected by the client over the events channel with a
-// ModeChanged{mode} message and echoed back by the server.
+// ModeChanged{mode} message and echoed back by the server. ModeTTS is entered by
+// a SpeakText request (not ModeChanged) and reported in stats while a synthesized
+// reply is playing.
 const (
 	ModeIdle     = "idle"
 	ModeLoopback = "loopback"
 	ModeTone     = "tone"
+	ModeTTS      = "tts"
 )
 
 // toneFrequencyHz / toneAmplitude define the built-in test tone (a calm A4 at a
@@ -53,8 +57,10 @@ type EventSink interface {
 
 // Config configures the Manager. ICEServers is optional: localhost and most LAN
 // setups connect on host candidates alone, so the default (none) works without
-// any external STUN/TURN dependency.
+// any external STUN/TURN dependency. TTS is the optional local speech engine
+// (Phase 4); when nil or unavailable, SpeakText requests are rejected.
 type Config struct {
 	ICEServers []webrtc.ICEServer
+	TTS        tts.Engine
 	Log        *slog.Logger
 }

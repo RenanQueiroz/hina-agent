@@ -5,10 +5,13 @@ package doctor
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"strings"
 
+	"github.com/RenanQueiroz/hina-agent/internal/assets"
 	"github.com/RenanQueiroz/hina-agent/internal/config"
+	"github.com/RenanQueiroz/hina-agent/internal/onnx"
 	"github.com/RenanQueiroz/hina-agent/internal/platform"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
 )
@@ -71,8 +74,48 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 		r.add("https cert", "unavailable", "no cert configured (localhost mic is fine; LAN mic needs HTTPS — see mkcert/reverse-proxy guidance)")
 	}
 
-	// Local ONNX voice — gated on the ORT/DLL spike; not yet implemented.
-	r.add("local voice (ASR/TTS via ONNX)", "unavailable", "not yet implemented (Phases 4–5; Windows gated to Phase 11)")
+	// Shared ONNX runtime + local TTS (Phase 4). In the default CGo-free build the
+	// runtime is the stub (unavailable); the onnx-tagged build links ORT and loads
+	// it from the app-managed lib dir. Local TTS needs both the runtime and the
+	// downloaded Supertonic assets.
+	root := cfg.TTS.AssetsRoot(paths.Cache)
+	// Make the root owner-private AND verify the ORT library's checksum BEFORE
+	// constructing the backend, so this command never dlopens a stale/corrupted/
+	// swapped native library from a writable-by-others location, and load the EXACT
+	// verified path (not a dir search).
+	var info onnx.Info
+	if secureErr := assets.SecureRoot(root); secureErr != nil {
+		info = onnx.Info{Available: false, Reason: "asset root not owner-private: " + secureErr.Error()}
+	} else if ortOK, ortReason := assets.ORTVerified(root, runtime.GOOS, runtime.GOARCH); ortOK {
+		backend, _ := onnx.New(onnx.Config{LibFile: assets.ORTLibPath(root, runtime.GOOS, runtime.GOARCH)})
+		info = backend.Info()
+		_ = backend.Close()
+	} else {
+		info = onnx.Info{Available: false, Reason: ortReason}
+	}
+	if info.Available {
+		r.add("onnx runtime", "ok", fmt.Sprintf("ORT %s (%s) — %s", info.Version, info.Provider, info.LibPath))
+	} else {
+		reason := info.Reason
+		if reason == "" {
+			reason = "not linked"
+		}
+		r.add("onnx runtime", "unavailable", reason)
+	}
+
+	as := assets.Verify(root, runtime.GOOS, runtime.GOARCH)
+	switch {
+	case as.ORTUnsupported:
+		r.add("local tts (supertonic)", "unavailable", "no ONNX Runtime build for this platform (Windows local voice gated to Phase 11)")
+	case !cfg.TTS.Enabled:
+		r.add("local tts (supertonic)", "unavailable", "disabled: set [tts] enabled=true, build with -tags onnx, and run 'hina assets pull'")
+	case !info.Available:
+		r.add("local tts (supertonic)", "unavailable", "onnx runtime not linked (build with -tags onnx)")
+	case !as.Complete:
+		r.add("local tts (supertonic)", "unavailable", "model assets not installed (run: hina assets pull)")
+	default:
+		r.add("local tts (supertonic)", "ok", "Supertonic models installed; runtime linked")
+	}
 
 	return r
 }

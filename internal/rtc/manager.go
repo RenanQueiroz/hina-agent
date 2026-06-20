@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/RenanQueiroz/hina-agent/internal/id"
+	"github.com/RenanQueiroz/hina-agent/internal/tts"
 	"github.com/pion/interceptor"
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
@@ -41,6 +42,7 @@ type Manager struct {
 	iceServers []webrtc.ICEServer
 	log        *slog.Logger
 	sink       EventSink
+	tts        tts.Engine // optional local speech engine, shared across sessions
 
 	mu        sync.Mutex
 	sessions  map[string]*Session           // userID -> active (committed) session
@@ -86,6 +88,7 @@ func NewManager(cfg Config, sink EventSink) (*Manager, error) {
 		iceServers: cfg.ICEServers,
 		log:        log,
 		sink:       sink,
+		tts:        cfg.TTS,
 		sessions:   make(map[string]*Session),
 		pending:    make(map[string]*Session),
 		userGen:    make(map[string]uint64),
@@ -275,7 +278,7 @@ func (mgr *Manager) newSession(ctx context.Context, userID, conversationID, offe
 	if err != nil {
 		return nil, "", fmt.Errorf("rtc: new peer connection: %w", err)
 	}
-	s := newSession(id.New("rtc"), userID, conversationID, pc, mgr.log, mgr.sink)
+	s := newSession(id.New("rtc"), userID, conversationID, pc, mgr.log, mgr.sink, mgr.tts)
 	s.onClose = func() { mgr.onSessionClosed(s) }
 	s.onReady = func() { mgr.Commit(s.id) } // commit when the control channel opens
 	s.wire()
@@ -391,6 +394,23 @@ func (mgr *Manager) CloseSession(sessionID string) {
 	if target != nil {
 		target.Close()
 	}
+}
+
+// ErrNoSession is returned by Speak when the user has no active live session.
+var ErrNoSession = errors.New("rtc: no active session for user")
+
+// Speak synthesizes text into the user's active live session over the outbound
+// audio path (server-driven TTS, e.g. speaking a chat reply aloud). It returns
+// ErrNoSession if the user has no active call, or the session's synchronous
+// rejection (unavailable / empty / too long / unknown voice / too many sentences).
+func (mgr *Manager) Speak(userID, text string, opts tts.Options) error {
+	mgr.mu.Lock()
+	sess := mgr.sessions[userID]
+	mgr.mu.Unlock()
+	if sess == nil {
+		return ErrNoSession
+	}
+	return sess.speak(text, opts)
 }
 
 // Stats returns a snapshot of every active session's metrics for the admin view.

@@ -10,6 +10,8 @@ import {
   TypePlaybackProgress,
   TypePlaybackStarted,
   TypePlaybackStopped,
+  TypeSpeakText,
+  TypeTTSCompleted,
   TypeUserInterrupted,
   type Event as ServerEvent,
 } from "./events.gen";
@@ -25,11 +27,13 @@ export type LiveStatus = "idle" | "connecting" | "connected" | "closed" | "error
 
 export interface LiveState {
   status: LiveStatus;
-  mode: string; // idle | loopback | tone
+  mode: string; // idle | loopback | tone | tts
   error?: string;
   captureMs?: number;
   playedMs?: number;
   framesOut?: number;
+  /** True when the last spoken reply was cut short (synthesis cap or dropped frames). */
+  replyTruncated?: boolean;
 }
 
 interface ConnectOpts {
@@ -224,12 +228,24 @@ export class LiveSession {
         // becomes the worklet's report generation so we can drop stale reports.
         this.gate = { epoch: Number(p.epoch ?? 0), lastSeq: 0 };
         this.node?.port.postMessage({ type: "reset", epoch: Number(p.epoch ?? 0) });
-        this.patch({ mode: String(p.source ?? this.state.mode), playedMs: 0 });
+        this.patch({ mode: String(p.source ?? this.state.mode), playedMs: 0, replyTruncated: false });
+        break;
+      case TypeTTSCompleted:
+        // A spoken reply finished; flag it if synthesis was capped or frames were
+        // dropped (the spoken text was incomplete) so the UI can warn the user.
+        this.patch({ replyTruncated: Boolean(p.truncated) });
         break;
       case TypePlaybackStopped:
-        // Stop accepting audio and drop anything still buffered.
-        this.gate = { epoch: null, lastSeq: 0 };
-        this.node?.port.postMessage({ type: "flush" });
+        if (Boolean(p.truncated)) {
+          // Barge-in / explicit stop: close the gate and drop buffered audio now.
+          this.gate = { epoch: null, lastSeq: 0 };
+          this.node?.port.postMessage({ type: "flush" });
+        }
+        // Normal completion (truncated=false): leave the gate OPEN. The reliable
+        // control stop can overtake the LAST audio frame (sent just before it, on
+        // the separate unreliable channel), so closing the gate here would drop
+        // that frame and clip the tail. The worklet drains its ring buffer, and the
+        // gate is reset by the next PlaybackStarted.
         this.patch({ mode: "idle" });
         break;
       case TypeAudioInputFrame:
@@ -291,6 +307,14 @@ export class LiveSession {
   /** Select the outbound source: "loopback", "tone", or "idle". */
   setMode(mode: string) {
     this.sendControl(TypeModeChanged, { mode });
+  }
+
+  /**
+   * Speak text aloud over the live session using the server's local TTS engine
+   * (the text-driven voice demo). Supersedes any in-flight spoken reply.
+   */
+  speak(text: string, voice?: string, lang?: string) {
+    this.sendControl(TypeSpeakText, { text, voice, lang });
   }
 
   /**

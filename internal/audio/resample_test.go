@@ -86,6 +86,36 @@ func TestResamplerPreservesPassbandEnergy(t *testing.T) {
 	}
 }
 
+// Flush recovers the filter's tail at the end of a finite stream: Process alone
+// leaves a few samples buffered, so without Flush the end of a clip is clipped.
+func TestResamplerFlushRecoversTail(t *testing.T) {
+	r, err := NewResampler(InputSampleRate, OutputSampleRate) // 48k -> 24k
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := make([]float32, InputSampleRate/10) // 0.1 s of 48 kHz
+	NewToneGenerator(InputSampleRate, 440, 0.5).Fill(in)
+	processed := feed(t, r, in, 960)
+
+	tail, err := r.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if len(tail) == 0 {
+		t.Fatal("Flush returned no tail; the stream end would be clipped")
+	}
+	// Process + Flush should converge to the ideal 1/2 ratio more closely than
+	// Process alone (which is short by the buffered tail).
+	ideal := len(in) / 2
+	total := len(processed) + len(tail)
+	if d := math.Abs(float64(total - ideal)); d > float64(ideal)*0.02 {
+		t.Fatalf("Process+Flush produced %d samples, want ~%d", total, ideal)
+	}
+	if total <= len(processed) {
+		t.Fatalf("Flush added no samples (processed=%d, total=%d)", len(processed), total)
+	}
+}
+
 func TestResamplerRejectsBadRate(t *testing.T) {
 	if _, err := NewResampler(0, 16000); err == nil {
 		t.Fatal("expected error for zero input rate")

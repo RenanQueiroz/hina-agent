@@ -40,3 +40,15 @@ func (r *Resampler) Process(in []float32) ([]float32, error) {
 	}
 	return out, nil
 }
+
+// Flush returns the final samples still held in the polyphase filter at the end
+// of a FINITE stream. Call it once after the last Process so the stream's tail
+// isn't dropped (a streaming filter buffers a few samples); the returned slice is
+// owned by the caller. After Flush the resampler should not be reused.
+func (r *Resampler) Flush() ([]float32, error) {
+	out, err := r.eng.Flush()
+	if err != nil {
+		return nil, fmt.Errorf("audio: resample flush %d->%d Hz: %w", r.inRate, r.outRate, err)
+	}
+	return out, nil
+}

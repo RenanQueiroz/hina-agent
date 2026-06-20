@@ -98,6 +98,38 @@ type RTCStats struct {
 	Sessions []RTCSessionStats `json:"sessions"`
 }
 
+// AdminRuntime is the GET /admin/runtime response: local-inference backend status.
+type AdminRuntime struct {
+	LLMProvider string     `json:"llm_provider"`
+	TTS         TTSRuntime `json:"tts"`
+}
+
+// TTSRuntime is the local TTS engine + ONNX runtime status for the admin view.
+type TTSRuntime struct {
+	Enabled     bool       `json:"enabled"`
+	Available   bool       `json:"available"`
+	Loaded      bool       `json:"loaded"` // models currently resident (warm)
+	Voice       string     `json:"voice"`
+	Lang        string     `json:"lang"`
+	Steps       int        `json:"steps"`
+	Reason      string     `json:"reason,omitempty"` // why unavailable
+	Runtime     ORTRuntime `json:"runtime"`
+	ColdLoadMs  int64      `json:"cold_load_ms"`  // last cold model-load latency
+	LastSynthMs int64      `json:"last_synth_ms"` // last per-sentence synth latency
+	SynthCount  int64      `json:"synth_count"`
+	ErrorCount  int64      `json:"error_count"`
+	LastError   string     `json:"last_error,omitempty"`
+}
+
+// ORTRuntime is the ONNX Runtime library status (version/provider/lib path).
+type ORTRuntime struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	LibPath   string `json:"lib_path,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
 // AdminUser is a user row in the admin list.
 type AdminUser struct {
 	ID                 string    `json:"id"`

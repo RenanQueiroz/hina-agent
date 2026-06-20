@@ -24,6 +24,8 @@ func main() {
 		err = cmdDoctor(os.Args[2:])
 	case "migrate":
 		err = cmdMigrate(os.Args[2:])
+	case "assets":
+		err = cmdAssets(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("hina", version)
 		return
@@ -49,6 +51,7 @@ Usage:
   hina setup      Create app dirs, run migrations, bootstrap the admin
   hina doctor     Report host capabilities and feature availability
   hina migrate    Apply database migrations (migrate down [N|all] to roll back)
+  hina assets     Manage local-inference downloads (status|verify|pull)
   hina version    Print version
 
 Pass -h after a command for its flags.

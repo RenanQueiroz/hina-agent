@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Mic, MicOff, Radio, Square, Volume2 } from "lucide-react";
+import { Mic, MicOff, MessageSquare, Radio, Square, Volume2 } from "lucide-react";
 import { LiveSession, type LiveState } from "../lib/rtc";
 import { Button, Card } from "../components/ui";
 
@@ -11,6 +11,7 @@ export function LivePage() {
   const [state, setState] = useState<LiveState>({ status: "idle", mode: "idle" });
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState<string>("");
+  const [speakText, setSpeakText] = useState("");
   const sessionRef = useRef<LiveSession | null>(null);
 
   // When a session reaches a terminal state — including a server-side
@@ -122,6 +123,31 @@ export function LivePage() {
         </div>
       </Card>
 
+      <Card className="mb-4 p-4">
+        <h2 className="mb-2 text-sm font-semibold text-zinc-600 dark:text-zinc-300">
+          Speak (local TTS)
+        </h2>
+        <textarea
+          value={speakText}
+          onChange={(e) => setSpeakText(e.target.value)}
+          placeholder="Type a message to hear it spoken aloud over the live session…"
+          rows={2}
+          maxLength={4000}
+          className="w-full resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+        />
+        <div className="mt-2 flex items-center gap-2">
+          <Button
+            disabled={state.status !== "connected" || speakText.trim() === ""}
+            onClick={() => sessionRef.current?.speak(speakText.trim())}
+          >
+            <MessageSquare size={16} /> Speak
+          </Button>
+          <span className="text-xs text-zinc-400">
+            Requires local TTS enabled on the server ([tts] + onnx build + assets).
+          </span>
+        </div>
+      </Card>
+
       <Card className="p-4">
         <h2 className="mb-2 text-sm font-semibold text-zinc-600 dark:text-zinc-300">Session</h2>
         <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
@@ -131,6 +157,11 @@ export function LivePage() {
           <Stat label="Out frame #" value={state.framesOut != null ? String(state.framesOut) : "—"} />
         </dl>
         {state.error && <p className="mt-3 text-sm text-red-500">{state.error}</p>}
+        {state.replyTruncated && (
+          <p className="mt-3 text-sm text-amber-600 dark:text-amber-400">
+            The last spoken reply was cut short (synthesis cap or dropped audio).
+          </p>
+        )}
         <p className="mt-3 text-xs text-zinc-400">
           Speak and choose <strong>Loopback</strong> to hear yourself echoed back, or{" "}
           <strong>Tone</strong> for a generated test tone. Network loss/jitter/RTT are in Admin →

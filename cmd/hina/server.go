@@ -5,16 +5,22 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"path/filepath"
+	"runtime"
 	"time"
 
+	"github.com/RenanQueiroz/hina-agent/internal/assets"
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/config"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/httpapi"
 	"github.com/RenanQueiroz/hina-agent/internal/llm"
+	"github.com/RenanQueiroz/hina-agent/internal/onnx"
 	"github.com/RenanQueiroz/hina-agent/internal/platform"
 	"github.com/RenanQueiroz/hina-agent/internal/rtc"
+	"github.com/RenanQueiroz/hina-agent/internal/tts"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -81,9 +87,18 @@ func cmdServer(args []string) error {
 	bus := events.NewBus(a.store)
 	am := auth.NewManager(a.store, a.cfg.Server.TLSEnabled())
 
+	// Local TTS engine (Phase 4). Off unless [tts] enabled; even then it reports
+	// itself unavailable in the default CGo-free build (the onnx runtime isn't
+	// linked) or when the model assets aren't installed. The bus is its event sink
+	// so RuntimeModel*/load events are observable.
+	ttsEngine := buildTTS(a, bus)
+	if ttsEngine != nil {
+		defer ttsEngine.Close()
+	}
+
 	// WebRTC voice bridge (Phase 3). The bus is its SSE event sink so live
 	// audio/lifecycle events are observable on the conversation stream.
-	rtcMgr, err := rtc.NewManager(rtc.Config{ICEServers: iceServers(a.cfg.Realtime.ICEServers), Log: a.log}, bus)
+	rtcMgr, err := rtc.NewManager(rtc.Config{ICEServers: iceServers(a.cfg.Realtime.ICEServers), TTS: ttsEngine, Log: a.log}, bus)
 	if err != nil {
 		return err
 	}
@@ -91,6 +106,7 @@ func cmdServer(args []string) error {
 
 	srv := httpapi.New(a.cfg, a.store, bus, am, provider, a.logs, a.log)
 	srv.SetRealtime(rtcMgr)
+	srv.SetTTS(ttsEngine)
 	srv.SetReady(true)
 
 	httpSrv := &http.Server{
@@ -125,6 +141,99 @@ func cmdServer(args []string) error {
 		return nil
 	}
 	return err
+}
+
+// buildTTS constructs the local TTS engine when [tts] is enabled, wiring the
+// shared ONNX runtime (from the app-managed lib dir) and the installed Supertonic
+// assets. It returns nil when TTS is disabled; when enabled but unbuilt (default
+// CGo-free build) or uninstalled, the returned engine reports itself unavailable
+// and SpeakText requests are rejected at runtime.
+func buildTTS(a *app, sink tts.EventSink) tts.Engine {
+	if !a.cfg.TTS.Enabled {
+		return nil
+	}
+	if assets.WindowsLocalVoiceGated && runtime.GOOS == "windows" {
+		a.log.Warn("tts: local voice is gated to Phase 11 on Windows; leaving it disabled")
+		return nil
+	}
+	root := assetsRoot(a.cfg, a.paths)
+	// Make the asset root owner-only BEFORE verifying/loading: the ORT library is
+	// dlopen'd (native code) and that verify->dlopen step is only safe if no other
+	// local principal can swap files. The default cache dir is already private, but
+	// a custom [tts] assets_dir bypasses that — so secure it (0700) or fail closed
+	// if another user owns it.
+	if !secureAssetRoot(root, a.log) {
+		return nil
+	}
+	// Verify the COMPLETE pinned manifest (the ORT native library AND every
+	// Supertonic model/config/voice) by checksum on disk BEFORE onnx.New dlopens
+	// the runtime or the engine opens a graph — so a stale, corrupted, or swapped
+	// asset is never loaded, and TTS fails closed (disabled) rather than reporting
+	// available and then misbehaving under a live request.
+	if st := assets.VerifyLocal(root); !st.Complete {
+		a.log.Warn("tts: local-inference assets failed verification; local TTS disabled (run: hina assets pull)",
+			"reason", firstUnverified(st))
+		return nil
+	}
+	_, onnxDir, voiceDir := assets.Layout(root)
+	// Load EXACTLY the verified library path (not a dir search), so the loaded
+	// native code is the file whose checksum we just confirmed.
+	libFile := assets.ORTLibPath(root, runtime.GOOS, runtime.GOARCH)
+	backend, err := onnx.New(onnx.Config{LibFile: libFile, IntraOpThreads: a.cfg.TTS.Threads})
+	if err != nil {
+		a.log.Warn("tts: onnx backend init failed", "err", err)
+	}
+	engine := tts.NewSynthesizer(tts.Config{
+		Backend:  backend,
+		OnnxDir:  onnxDir,
+		VoiceDir: voiceDir,
+		IdleTTL:  a.cfg.TTS.IdleTTLOr(5 * time.Minute),
+		Defaults: tts.Options{Voice: a.cfg.TTS.Voice, Lang: a.cfg.TTS.Lang, Speed: a.cfg.TTS.Speed, Steps: a.cfg.TTS.Steps},
+		Sink:     sink,
+		Log:      a.log,
+		// Load ONNX graphs/config and voices from CHECKSUM-VERIFIED bytes, so an
+		// asset tampered with after startup is never fed to ORT (the verified bytes
+		// are exactly the bytes loaded — no reopen window).
+		ReadAsset: func(file string) ([]byte, error) {
+			return assets.ReadVerified(root, filepath.Join("supertonic", "onnx", file))
+		},
+		ReadVoiceAsset: func(id string) ([]byte, error) {
+			return assets.ReadVerified(root, filepath.Join("supertonic", "voice_styles", id+".json"))
+		},
+	})
+	st := engine.Status()
+	a.log.Info("tts engine", "available", st.Available, "reason", st.Reason, "ort", st.Runtime.Version)
+	return engine
+}
+
+// secureAssetRoot makes the local-inference asset root owner-private (0700 on
+// Unix) so no other local principal can swap an asset in the verify->load window,
+// then confirms it. It returns false (logging why) if Hina can't secure it — e.g.
+// the directory is owned by another user — so TTS fails closed rather than loading
+// native code from a writable-by-others location.
+func secureAssetRoot(root string, log *slog.Logger) bool {
+	if err := assets.SecureRoot(root); err != nil {
+		log.Warn("tts: cannot secure the asset root; local TTS disabled", "root", root, "err", err)
+		return false
+	}
+	return true
+}
+
+// firstUnverified returns a human reason for an incomplete asset set: the first
+// missing/mismatched asset, or the platform-unsupported note.
+func firstUnverified(st assets.Status) string {
+	if st.ORTUnsupported {
+		return "no ONNX Runtime build for this platform"
+	}
+	for _, a := range st.Assets {
+		if !a.Verified {
+			if a.Reason != "" {
+				return a.Name + ": " + a.Reason
+			}
+			return a.Name + ": unverified"
+		}
+	}
+	return "incomplete"
 }
 
 // iceServers maps configured ICE servers to Pion's ICEServer list, carrying

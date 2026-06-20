@@ -1,6 +1,7 @@
 // Typed API client. Shapes come from api.gen.ts (generated from internal/wire).
 import type {
   AdminLLMInfo,
+  AdminRuntime,
   AdminUser,
   ConfigInfo,
   Conversation,
@@ -82,4 +83,12 @@ export const api = {
     ),
   adminLLM: () => req<AdminLLMInfo>("/api/v1/admin/llm"),
   adminRTC: () => req<RTCStats>("/api/v1/admin/rtc"),
+  adminRuntime: () => req<AdminRuntime>("/api/v1/admin/runtime"),
+
+  // Speak text into the caller's active live session (server-driven TTS).
+  speak: (text: string, voice?: string, lang?: string) =>
+    req<{ status: string }>("/api/v1/realtime/speak", {
+      method: "POST",
+      body: JSON.stringify({ text, voice, lang }),
+    }),
 };

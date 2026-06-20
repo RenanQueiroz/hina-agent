@@ -3,15 +3,101 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strconv"
 
+	"github.com/RenanQueiroz/hina-agent/internal/assets"
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
+	"github.com/RenanQueiroz/hina-agent/internal/config"
 	"github.com/RenanQueiroz/hina-agent/internal/doctor"
 	"github.com/RenanQueiroz/hina-agent/internal/platform"
 )
+
+// assetsRoot resolves the local-inference asset root for the app's paths.
+func assetsRoot(cfg config.Config, paths platform.Paths) string {
+	return cfg.TTS.AssetsRoot(paths.Cache)
+}
+
+// cmdAssets manages the pinned local-inference downloads (ONNX Runtime + the
+// Supertonic TTS models): `hina assets status|verify|pull`.
+func cmdAssets(args []string) error {
+	fs := flag.NewFlagSet("assets", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "output JSON (non-interactive)")
+	_ = fs.Parse(args)
+	sub := "status"
+	if fs.NArg() > 0 {
+		sub = fs.Arg(0)
+	}
+
+	a, err := openApp()
+	if err != nil {
+		return err
+	}
+	defer a.close()
+	root := assetsRoot(a.cfg, a.paths)
+
+	switch sub {
+	case "status", "verify":
+		st := assets.VerifyLocal(root)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(st); err != nil {
+				return err
+			}
+		} else {
+			printAssetStatus(st)
+		}
+		if sub == "verify" && !st.Complete {
+			return errors.New("local-inference assets are incomplete (run: hina assets pull)")
+		}
+		return nil
+	case "pull":
+		// Install into an owner-private root so the server can later trust it for
+		// native-library loading (same invariant the server enforces at startup).
+		if err := assets.SecureRoot(root); err != nil {
+			return fmt.Errorf("secure asset root %s: %w", root, err)
+		}
+		if err := assets.PullLocal(context.Background(), root, a.log); err != nil {
+			return err
+		}
+		fmt.Println("assets installed:", root)
+		return nil
+	default:
+		return fmt.Errorf("unknown assets subcommand %q (use status|verify|pull)", sub)
+	}
+}
+
+func printAssetStatus(st assets.Status) {
+	fmt.Printf("Local-inference assets (root: %s)\n", st.Root)
+	fmt.Printf("  ONNX Runtime %s / Supertonic %s\n\n", assets.ORTVersion, assets.SupertonicRevision[:12])
+	if st.ORTUnsupported {
+		fmt.Println("  [unsupported] no ONNX Runtime CPU build for this platform — local TTS unavailable here")
+	}
+	for _, a := range st.Assets {
+		mark := "missing"
+		switch {
+		case a.Verified:
+			mark = "ok"
+		case a.Present:
+			mark = "bad"
+		}
+		line := fmt.Sprintf("  [%-7s] %s", mark, a.Name)
+		if a.Reason != "" {
+			line += " — " + a.Reason
+		}
+		fmt.Println(line)
+	}
+	fmt.Println()
+	if st.Complete {
+		fmt.Println("  All assets present and verified.")
+	} else {
+		fmt.Println("  Incomplete. Run: hina assets pull")
+	}
+}
 
 func cmdMigrate(args []string) error {
 	a, err := openApp()
@@ -149,6 +235,19 @@ provider = "mock"   # mock | openai | openai-compat
 # base_url = "http://localhost:8080/v1"   # required for openai-compat (local)
 # api_key = "${OPENAI_API_KEY}"
 system_prompt = "You are Hina, a helpful, concise assistant."
+
+[tts]
+# Local text-to-speech (Phase 4, Supertonic via ONNX Runtime). Off by default and
+# only usable in the onnx-tagged build with the model assets installed
+# ("hina assets pull"); otherwise the engine reports unavailable in "hina doctor".
+enabled = false
+voice = "M1"        # preset voice id (F1..F5, M1..M5); no voice cloning
+lang = "en"         # default language tag
+# speed = 1.05      # tempo multiplier (>1 is faster)
+# steps = 8         # flow-matching denoise steps (latency/quality tradeoff)
+# idle_ttl = "5m"   # unload models after this idle period (keeps memory bounded)
+# threads = 0       # ORT intra-op CPU threads (0 = ORT default)
+# assets_dir = ""   # override the model/runtime asset root (default: OS cache dir)
 
 # [paths]  # optional overrides of the OS-resolved app directories
 # data_dir = "/var/lib/hina"

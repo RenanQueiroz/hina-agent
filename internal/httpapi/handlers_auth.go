@@ -106,12 +106,35 @@ func (s *Server) handleAdminLLM(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleAdminRuntime(w http.ResponseWriter, _ *http.Request) {
-	// Stub: runtime/backend status (local STT/LLM/TTS, sandbox) fills in across
-	// later phases.
-	writeJSON(w, http.StatusOK, map[string]any{
-		"llm_provider": s.provider.Name(),
-		"note":         "runtime status expands in later phases",
-	})
+	out := wire.AdminRuntime{
+		LLMProvider: s.provider.Name(),
+		TTS:         wire.TTSRuntime{Enabled: s.cfg.TTS.Enabled},
+	}
+	if s.tts != nil {
+		st := s.tts.Status()
+		out.TTS = wire.TTSRuntime{
+			Enabled:     s.cfg.TTS.Enabled,
+			Available:   st.Available,
+			Loaded:      st.Loaded,
+			Voice:       st.Voice,
+			Lang:        st.Lang,
+			Steps:       st.Steps,
+			Reason:      st.Reason,
+			ColdLoadMs:  st.ColdLoadMillis,
+			LastSynthMs: st.LastSynthMillis,
+			SynthCount:  st.SynthCount,
+			ErrorCount:  st.ErrorCount,
+			LastError:   st.LastError,
+			Runtime: wire.ORTRuntime{
+				Available: st.Runtime.Available,
+				Version:   st.Runtime.Version,
+				Provider:  st.Runtime.Provider,
+				LibPath:   st.Runtime.LibPath,
+				Reason:    st.Runtime.Reason,
+			},
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleAdminLogs streams server logs (recent + live) over SSE from the
