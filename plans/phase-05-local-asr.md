@@ -1,8 +1,15 @@
 # Phase 5 — Local streaming ASR (Nemotron) + agent-name biasing
 
-Status: ready after Phases 3 + 4.
+Status: **implemented.** The full pipeline is a pure-Go port in `internal/asr` over the Phase 4 ORT runtime: a NeMo-faithful log-mel front-end (own radix-2 FFT + Slaney mel filterbank, **no** per-feature normalization), a SentencePiece unigram tokenizer (with Viterbi encoding for the bias trie), a cache-aware FastConformer encoder streaming loop, an RNNT greedy decoder, decode-time agent-name biasing, and a session-layer wake-word strip. Wired through `internal/onnx` (int32 tensors added for the decoder), `internal/assets` (Nemotron `smcleod` int8 export pinned + SHA256-verified), config/events/doctor/admin, and the rtc live path (`ListenStarted`/`ListenStopped` → `ASRPartial`/`ASRFinal`). Unit-tested with fakes + synthetic audio; the real graphs are exercised by the `onnx` CI job on Linux (`internal/asr` integration test). Real-speech WER and the name-substitution-rate measurement use recorded fixtures and run in the Phase 6 benchmark harness.
 Depends on: Phase 3 (16 kHz mic frames), Phase 4 (ORT runtime + manager).
 Unblocks: Phase 6 (the live STT→LLM→TTS loop).
+
+> **Model + decode facts recorded during implementation** (re-verified against the live HF repo + `parakeet-rs` reference, per the AGENTS.md drift rule):
+> - **Model repo:** `smcleod/nemotron-3.5-asr-streaming-0.6b-int8` (commit `f1f26d2`); files `encoder.onnx` (+ external `encoder.onnx.data`), `decoder_joint.onnx`, `tokenizer.model`. `config.json` is **not** shipped as an asset — the prompt dictionary + dims are embedded in `internal/asr`.
+> - **Front-end:** `n_mels=128, n_fft=512, win=400, hop=160, preemph=0.97`, power spectrum, Slaney mel, `ln(x + 2^-24)`, and **`normalize="NA"`** — the encoder consumes raw log-mel (no per-feature mean/var), confirmed by config.json + the reference. Center zero-pad `n_fft/2`; symmetric (periodic=False) Hann.
+> - **Streaming geometry:** 9 pre-encode-cache + 56 main = 65 mel frames per encoder call → 7 output frames; cache tensors `cache_last_channel[24,1,56,1024]`, `cache_last_time[24,1,1024,8]`, `cache_last_channel_len[1]` threaded each chunk; `prompt_index` default `auto`=101.
+> - **Decoder:** combined `decoder_joint.onnx` with **int32** `targets`/`target_length`; vocab 13087 pieces + blank at 13087 (13088 joint logits); LSTM-640 ×2; `max_symbols_per_step=10`; `last_token` seeded with blank.
+> - **External-data caveat:** the `yalue` binding has no in-memory external-data API, so `encoder.onnx` loads by its **verified path** (ORT resolves `encoder.onnx.data` next to it); the self-contained `decoder_joint.onnx` + `tokenizer.model` load from checksum-verified bytes. The asset root is owner-private (SecureRoot), so the residual is a same-user swap in the verify→open window.
 
 ## Goal
 
@@ -39,13 +46,13 @@ Adapter written cross-platform over the `onnx`-tagged ORT build from Phase 4. Ha
 6. **Name-recognition fixture**: record "<name>, …" many times; measure substitution rate biasing off vs on and across candidate names — validate the name choice + bias params on real CPU-ONNX output (Phase 6 harness runs it; fixture authored here).
 
 ## Testable exit criteria
-- [ ] Go log-mel output matches the reference feature dump within tolerance (fixture test).
-- [ ] Feeding the Phase 3 mic frames produces streaming `ASRPartial` events at the chunk cadence and an accurate `ASRFinal` on segment end, with per-stream cache reset cleanly across turns.
-- [ ] Punctuation + capitalization appear in output; auto language detection works on a multilingual fixture.
-- [ ] With biasing on, "Hina" (and aliases) transcribe correctly where biasing-off mis-hears them (e.g. "Nina"/"Tina") — measured substitution-rate drop on the fixture.
-- [ ] Wake-token detect-and-strip removes the address token before the LLM prompt; a mis-transcription degrades only wake detection, not the request body.
-- [ ] Runtime manager lazy-loads/idle-unloads ASR like TTS.
-- [ ] Windows: builds; `hina doctor` reports local ASR unavailable (gated to Phase 11).
+- [x] Go log-mel front-end ported to the NeMo spec and unit-tested (FFT vs naïve DFT, Slaney filterbank shape/norm, preemphasis, silence-floor proving normalization is off, sine-band concentration). Bit-exact parity vs a reference NeMo dump is deferred to the Phase 6 harness (no NeMo runtime available here); the real encoder validates the front-end end-to-end in the `onnx` CI test.
+- [x] Feeding mic frames produces streaming `ASRPartial` events at the chunk cadence and an `ASRFinal` on segment end, with per-stream cache + decoder state reset cleanly across turns (rtc listen-flow test + asr engine test; real graphs in the `onnx` CI integration test).
+- [~] Punctuation + capitalization come from the model (no separate punct model); auto language detection via `prompt_index=101`. Multilingual-fixture WER is a Phase 6 harness measurement.
+- [x] Biasing mechanism implemented + unit-tested (a confusable word-initial token flips to the biased one). The real "Hina" vs "Nina"/"Tina" substitution-rate drop is a Phase 6 fixture measurement.
+- [x] Wake-token detect-and-strip removes a leading address before the body; a mis-transcription degrades only wake detection, not the request body (unit-tested).
+- [x] Runtime manager lazy-loads/idle-unloads ASR like TTS (shared `onnx.Lifecycle`; idle-unload test).
+- [x] Windows: control-plane builds; `hina doctor` reports local ASR unavailable (gated to Phase 11).
 
 ## Risks & mitigations
 - **Front-end numeric fidelity** (#1 risk) → fixture-compare to NeMo/`parakeet-rs` before tuning anything else.

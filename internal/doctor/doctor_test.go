@@ -63,3 +63,31 @@ func TestDoctorVerifiesORTBeforeLoading(t *testing.T) {
 		t.Fatalf("expected a verification reason, got %q", c.Detail)
 	}
 }
+
+// On a supported platform with TTS/ASR turned OFF, the local-voice checks must
+// report "disabled" — NOT "no ONNX Runtime build" (a regression guard for the
+// ORT-supported boolean in doctor.Run, which was once inverted).
+func TestDoctorReportsDisabledNotUnsupportedOnSupportedHost(t *testing.T) {
+	if _, ok := assets.ORTAsset(runtime.GOOS, runtime.GOARCH); !ok {
+		t.Skipf("no ORT build for %s/%s; the unsupported branch is correct here", runtime.GOOS, runtime.GOARCH)
+	}
+	tmp := t.TempDir()
+	paths := platform.Paths{
+		Config: filepath.Join(tmp, "config"), Cache: filepath.Join(tmp, "cache"),
+		Data: filepath.Join(tmp, "data"), Runtime: filepath.Join(tmp, "run"), Log: filepath.Join(tmp, "log"),
+	}
+	cfg := config.Default() // TTS + ASR disabled by default
+	rep := doctor.Run(context.Background(), cfg, paths)
+	for _, name := range []string{"local tts (supertonic)", "local asr (nemotron)"} {
+		c := check(t, rep, name)
+		if c.Status != "unavailable" {
+			t.Fatalf("%s status = %q, want unavailable (disabled)", name, c.Status)
+		}
+		if strings.Contains(c.Detail, "no ONNX Runtime build") {
+			t.Fatalf("%s wrongly reports no-ORT-build on a supported host: %q", name, c.Detail)
+		}
+		if !strings.Contains(c.Detail, "disabled") {
+			t.Fatalf("%s detail = %q, want a 'disabled' reason", name, c.Detail)
+		}
+	}
+}

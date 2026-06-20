@@ -3,9 +3,13 @@
 // receive PCM over the audio datachannel into the player worklet, and exchange
 // the typed event envelope over the control datachannel.
 import {
+  TypeASRFinal,
+  TypeASRPartial,
   TypeAudioInputFrame,
   TypeAudioOutputFrame,
   TypeError as TypeErrorEvent,
+  TypeListenStarted,
+  TypeListenStopped,
   TypeModeChanged,
   TypePlaybackProgress,
   TypePlaybackStarted,
@@ -34,6 +38,18 @@ export interface LiveState {
   framesOut?: number;
   /** True when the last spoken reply was cut short (synthesis cap or dropped frames). */
   replyTruncated?: boolean;
+  /** ASR (Phase 5): true while a listening segment is active. */
+  listening?: boolean;
+  /** Interim transcript while speaking (updated per decoded chunk). */
+  partial?: string;
+  /** Committed transcript of the last segment. */
+  transcript?: string;
+  /** True when the agent name was detected at the start of the last segment. */
+  wakeDetected?: boolean;
+  /** True when the last segment's transcript is incomplete (cut short server-side). */
+  transcriptTruncated?: boolean;
+  /** Why the transcript was truncated: "dropped" | "capped" | "max_duration". */
+  transcriptTruncationReason?: string;
 }
 
 interface ConnectOpts {
@@ -68,6 +84,10 @@ export class LiveSession {
   // Epoch being interrupted while we await the worklet's final flush cursor; null
   // when not interrupting.
   private interrupting: number | null = null;
+  // Current ASR segment id (from ListenStarted). Partial/final/stopped events for
+  // an older segment — e.g. a prior segment still finalizing when the next one
+  // started — are ignored so they can't clear or corrupt the active segment's UI.
+  private listenSeg: number | null = null;
   // Set by close(): a multi-await connect() checks this after each await so an
   // End/unmount during setup can't resurrect the mic or a live server session.
   private closed = false;
@@ -248,6 +268,46 @@ export class LiveSession {
         // gate is reset by the next PlaybackStarted.
         this.patch({ mode: "idle" });
         break;
+      case TypeListenStarted:
+        this.listenSeg = Number(p.seg ?? 0);
+        this.patch({
+          listening: true,
+          partial: "",
+          transcript: undefined,
+          wakeDetected: undefined,
+          transcriptTruncated: undefined,
+          transcriptTruncationReason: undefined,
+        });
+        break;
+      case TypeListenStopped:
+        // Server-side terminal for a segment that ended WITHOUT a transcript (e.g.
+        // a decode failure, which also emits an ErrorEvent). ASRFinal is the
+        // success terminal; either one must clear the listening UI. Ignore a
+        // terminal for an older segment so it can't clear a newer active one.
+        if (this.isCurrentSeg(p.seg)) {
+          this.patch({ listening: false, partial: "" });
+        }
+        break;
+      case TypeASRPartial:
+        if (this.isCurrentSeg(p.seg)) {
+          this.patch({ partial: String(p.text ?? "") });
+        }
+        break;
+      case TypeASRFinal:
+        // Segment committed: the server has finalized + reset; show the transcript.
+        // Drop a stale final from a previously-stopped segment (it would otherwise
+        // clear the listening UI of the segment that already started after it).
+        if (this.isCurrentSeg(p.seg)) {
+          this.patch({
+            listening: false,
+            partial: "",
+            transcript: String(p.text ?? ""),
+            wakeDetected: Boolean(p.wake_detected),
+            transcriptTruncated: Boolean(p.truncated),
+            transcriptTruncationReason: p.truncation_reason ? String(p.truncation_reason) : undefined,
+          });
+        }
+        break;
       case TypeAudioInputFrame:
         this.patch({ captureMs: Number(p.capture_ms ?? 0) });
         break;
@@ -289,6 +349,13 @@ export class LiveSession {
     });
   }
 
+  // isCurrentSeg reports whether an ASR event's segment id matches the active
+  // segment (the one ListenStarted last set). Events from an older segment are
+  // dropped so a late finalize can't clobber the current one.
+  private isCurrentSeg(seg: unknown): boolean {
+    return this.listenSeg !== null && Number(seg ?? -1) === this.listenSeg;
+  }
+
   // sendControl emits a full Phase 1 event envelope (not just type/payload) over
   // the control channel so the datachannel contract matches the SSE one.
   private sendControl(type: string, payload: unknown) {
@@ -315,6 +382,21 @@ export class LiveSession {
    */
   speak(text: string, voice?: string, lang?: string) {
     this.sendControl(TypeSpeakText, { text, voice, lang });
+  }
+
+  /**
+   * Begin an ASR listening segment: mic audio is transcribed by the server's
+   * local ASR engine, emitting interim partials (ASRPartial) and a final on
+   * stopListen (ASRFinal). Turn boundaries are client-driven here; VAD lands in
+   * Phase 6. language is a tag like "en" or "auto".
+   */
+  startListen(language?: string) {
+    this.sendControl(TypeListenStarted, { language });
+  }
+
+  /** Commit the active listening segment; the server replies with ASRFinal. */
+  stopListen() {
+    this.sendControl(TypeListenStopped, {});
   }
 
   /**
@@ -361,8 +443,25 @@ export class LiveSession {
     safeCall(() => node?.disconnect());
     safeCall(() => pc?.close());
 
+    // Settle UI state NOW, BEFORE the (possibly hanging) AudioContext.close await —
+    // the comment below notes that close may reject OR hang, and the round-14 stuck-
+    // listening fix must not depend on browser audio cleanup. Clear ASR listening
+    // state on teardown too: a call closing (End, ICE failure, unmount) mid-segment
+    // is abandoned by the server WITHOUT a terminal event, so without this the Live
+    // page would stay stuck on "Stop & transcribe" with no session, and a reconnect
+    // couldn't start a new segment. Cleared regardless of error/closed status.
+    this.listenSeg = null;
+    const reset: Partial<LiveState> = { listening: false, partial: "" };
+    if (this.state.status !== "error") {
+      reset.status = "closed";
+      reset.mode = "idle";
+    }
+    this.patch(reset);
+
     // The AudioContext close is the only awaitable and may reject or hang; do it
-    // last in its own guard so it can never block the teardown above.
+    // LAST, in its own guard, after UI state is already settled — so a stalled audio
+    // teardown can never leave the UI (or the page's session ref, which keys off the
+    // closed status) wedged.
     if (ctx && ctx.state !== "closed") {
       try {
         await ctx.close();
@@ -370,8 +469,6 @@ export class LiveSession {
         /* best-effort; the mic/pc are already released */
       }
     }
-
-    if (this.state.status !== "error") this.patch({ status: "closed", mode: "idle" });
   }
 }
 

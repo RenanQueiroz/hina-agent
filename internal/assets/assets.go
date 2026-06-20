@@ -171,6 +171,40 @@ func ORTVerified(root, goos, goarch string) (ok bool, reason string) {
 	return false, "not installed"
 }
 
+// SupertonicVerified reports whether every pinned Supertonic TTS model/config/
+// voice file is installed and matches its checksum on disk — the per-engine gate
+// so a TTS-only install isn't blocked by missing ASR assets (and vice-versa).
+// ok=false carries the first failing asset's reason.
+func SupertonicVerified(root string) (ok bool, reason string) {
+	for _, m := range supModels {
+		st := verifyAsset(root, Asset{Name: m.path, SHA256: m.sha256, Size: m.size, Dest: m.dest})
+		if !st.Verified {
+			if st.Reason != "" {
+				return false, m.path + ": " + st.Reason
+			}
+			return false, m.path + ": not installed"
+		}
+	}
+	return true, ""
+}
+
+// ASRVerified reports whether every pinned Nemotron ASR model file (encoder +
+// its external data, decoder_joint, tokenizer) is installed and matches its
+// checksum on disk — the gate to call before the ASR engine opens the encoder by
+// path. ok=false carries the first failing asset's reason.
+func ASRVerified(root string) (ok bool, reason string) {
+	for _, m := range nemoModels {
+		st := verifyAsset(root, Asset{Name: "nemotron/" + m.path, SHA256: m.sha256, Size: m.size, Dest: m.dest})
+		if !st.Verified {
+			if st.Reason != "" {
+				return false, "nemotron/" + m.path + ": " + st.Reason
+			}
+			return false, "nemotron/" + m.path + ": not installed"
+		}
+	}
+	return true, ""
+}
+
 // VerifyVoice re-checks a single preset voice file's checksum on disk (cheap —
 // ~290 KB). Used to re-verify an on-demand voice load against the pinned digest,
 // closing the gap between startup verification and a later (warm-bundle) load.
@@ -198,7 +232,7 @@ func VerifyVoice(root, id string) error {
 // caller loads exactly the verified content — closing the verify-then-reopen TOCTOU
 // where a concurrent writer could swap the file between the hash and the load.
 func ReadVerified(root, destRel string) ([]byte, error) {
-	for _, m := range supModels {
+	for _, m := range append(append([]supModel{}, supModels...), nemoModels...) {
 		if m.dest != destRel {
 			continue
 		}

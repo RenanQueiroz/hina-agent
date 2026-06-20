@@ -102,6 +102,24 @@ type RTCStats struct {
 type AdminRuntime struct {
 	LLMProvider string     `json:"llm_provider"`
 	TTS         TTSRuntime `json:"tts"`
+	ASR         ASRRuntime `json:"asr"`
+}
+
+// ASRRuntime is the local streaming ASR (Nemotron) engine + ONNX runtime status
+// for the admin view.
+type ASRRuntime struct {
+	Enabled     bool       `json:"enabled"`
+	Available   bool       `json:"available"`
+	Loaded      bool       `json:"loaded"` // models currently resident (warm)
+	Language    string     `json:"language"`
+	Biasing     bool       `json:"biasing"` // agent-name biasing active
+	Reason      string     `json:"reason,omitempty"`
+	Runtime     ORTRuntime `json:"runtime"`
+	ColdLoadMs  int64      `json:"cold_load_ms"`  // last cold model-load latency
+	LastChunkMs int64      `json:"last_chunk_ms"` // last chunk decode latency
+	ChunkCount  int64      `json:"chunk_count"`
+	ErrorCount  int64      `json:"error_count"`
+	LastError   string     `json:"last_error,omitempty"`
 }
 
 // TTSRuntime is the local TTS engine + ONNX runtime status for the admin view.

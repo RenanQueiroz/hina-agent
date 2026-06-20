@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/RenanQueiroz/hina-agent/internal/asr"
 	"github.com/RenanQueiroz/hina-agent/internal/assets"
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/config"
@@ -96,9 +97,17 @@ func cmdServer(args []string) error {
 		defer ttsEngine.Close()
 	}
 
+	// Local ASR engine (Phase 5). Off unless [asr] enabled; reports itself
+	// unavailable in the default CGo-free build or without installed assets. The
+	// bus is its event sink for RuntimeModel*/load observability.
+	asrEngine := buildASR(a, bus)
+	if asrEngine != nil {
+		defer asrEngine.Close()
+	}
+
 	// WebRTC voice bridge (Phase 3). The bus is its SSE event sink so live
 	// audio/lifecycle events are observable on the conversation stream.
-	rtcMgr, err := rtc.NewManager(rtc.Config{ICEServers: iceServers(a.cfg.Realtime.ICEServers), TTS: ttsEngine, Log: a.log}, bus)
+	rtcMgr, err := rtc.NewManager(rtc.Config{ICEServers: iceServers(a.cfg.Realtime.ICEServers), TTS: ttsEngine, ASR: asrEngine, Log: a.log}, bus)
 	if err != nil {
 		return err
 	}
@@ -107,6 +116,7 @@ func cmdServer(args []string) error {
 	srv := httpapi.New(a.cfg, a.store, bus, am, provider, a.logs, a.log)
 	srv.SetRealtime(rtcMgr)
 	srv.SetTTS(ttsEngine)
+	srv.SetASR(asrEngine)
 	srv.SetReady(true)
 
 	httpSrv := &http.Server{
@@ -165,14 +175,18 @@ func buildTTS(a *app, sink tts.EventSink) tts.Engine {
 	if !secureAssetRoot(root, a.log) {
 		return nil
 	}
-	// Verify the COMPLETE pinned manifest (the ORT native library AND every
-	// Supertonic model/config/voice) by checksum on disk BEFORE onnx.New dlopens
-	// the runtime or the engine opens a graph — so a stale, corrupted, or swapped
-	// asset is never loaded, and TTS fails closed (disabled) rather than reporting
-	// available and then misbehaving under a live request.
-	if st := assets.VerifyLocal(root); !st.Complete {
-		a.log.Warn("tts: local-inference assets failed verification; local TTS disabled (run: hina assets pull)",
-			"reason", firstUnverified(st))
+	// Verify the ORT native library AND every Supertonic model/config/voice by
+	// checksum on disk BEFORE onnx.New dlopens the runtime or the engine opens a
+	// graph — so a stale, corrupted, or swapped asset is never loaded, and TTS
+	// fails closed (disabled) rather than reporting available and then misbehaving.
+	// Only the TTS subset is required (an ASR-only install shouldn't block TTS and
+	// vice-versa), even though one `hina assets pull` installs both.
+	if ok, reason := assets.ORTVerified(root, runtime.GOOS, runtime.GOARCH); !ok {
+		a.log.Warn("tts: ONNX Runtime not verified; local TTS disabled (run: hina assets pull)", "reason", reason)
+		return nil
+	}
+	if ok, reason := assets.SupertonicVerified(root); !ok {
+		a.log.Warn("tts: Supertonic assets failed verification; local TTS disabled (run: hina assets pull)", "reason", reason)
 		return nil
 	}
 	_, onnxDir, voiceDir := assets.Layout(root)
@@ -206,34 +220,75 @@ func buildTTS(a *app, sink tts.EventSink) tts.Engine {
 	return engine
 }
 
+// buildASR constructs the local streaming ASR engine when [asr] is enabled,
+// wiring the shared ONNX runtime and the installed Nemotron assets. It mirrors
+// buildTTS: nil when disabled; an unavailable engine (default CGo-free build, or
+// uninstalled/unverified assets) when it can't run, so ListenStarted is rejected
+// at runtime. The encoder is loaded by its verified PATH (it has external weights
+// ORT resolves on disk); the decoder + tokenizer load from verified bytes.
+func buildASR(a *app, sink asr.EventSink) asr.Engine {
+	if !a.cfg.ASR.Enabled {
+		return nil
+	}
+	if assets.WindowsLocalVoiceGated && runtime.GOOS == "windows" {
+		a.log.Warn("asr: local voice is gated to Phase 11 on Windows; leaving it disabled")
+		return nil
+	}
+	root := assetsRoot(a.cfg, a.paths)
+	if !secureAssetRoot(root, a.log) {
+		return nil
+	}
+	if ok, reason := assets.ORTVerified(root, runtime.GOOS, runtime.GOARCH); !ok {
+		a.log.Warn("asr: ONNX Runtime not verified; local ASR disabled (run: hina assets pull)", "reason", reason)
+		return nil
+	}
+	if ok, reason := assets.ASRVerified(root); !ok {
+		a.log.Warn("asr: Nemotron assets failed verification; local ASR disabled (run: hina assets pull)", "reason", reason)
+		return nil
+	}
+	libFile := assets.ORTLibPath(root, runtime.GOOS, runtime.GOARCH)
+	backend, err := onnx.New(onnx.Config{LibFile: libFile, IntraOpThreads: a.cfg.ASR.Threads})
+	if err != nil {
+		a.log.Warn("asr: onnx backend init failed", "err", err)
+	}
+	engine := asr.NewRecognizer(asr.Config{
+		Backend:     backend,
+		ModelDir:    assets.ASRDir(root),
+		EncoderPath: assets.ASREncoderPath(root),
+		IdleTTL:     a.cfg.ASR.IdleTTLOr(5 * time.Minute),
+		Defaults:    asr.Options{Language: a.cfg.ASR.Language},
+		Agent: asr.AgentBias{
+			Name:         a.cfg.Agent.Name,
+			Aliases:      a.cfg.Agent.NameAliases,
+			ContextScore: a.cfg.ASR.ContextScore,
+			DepthScaling: a.cfg.ASR.DepthScaling,
+		},
+		Sink: sink,
+		Log:  a.log,
+		// Load the self-contained decoder + tokenizer from CHECKSUM-VERIFIED bytes.
+		ReadDecoder: func() ([]byte, error) {
+			return assets.ReadVerified(root, filepath.Join("nemotron", "decoder_joint.onnx"))
+		},
+		ReadTokenizer: func() ([]byte, error) {
+			return assets.ReadVerified(root, filepath.Join("nemotron", "tokenizer.model"))
+		},
+	})
+	st := engine.Status()
+	a.log.Info("asr engine", "available", st.Available, "reason", st.Reason, "biasing", st.Biasing, "ort", st.Runtime.Version)
+	return engine
+}
+
 // secureAssetRoot makes the local-inference asset root owner-private (0700 on
 // Unix) so no other local principal can swap an asset in the verify->load window,
 // then confirms it. It returns false (logging why) if Hina can't secure it — e.g.
-// the directory is owned by another user — so TTS fails closed rather than loading
-// native code from a writable-by-others location.
+// the directory is owned by another user — so the engine fails closed rather than
+// loading native code from a writable-by-others location.
 func secureAssetRoot(root string, log *slog.Logger) bool {
 	if err := assets.SecureRoot(root); err != nil {
-		log.Warn("tts: cannot secure the asset root; local TTS disabled", "root", root, "err", err)
+		log.Warn("local-inference: cannot secure the asset root; disabled", "root", root, "err", err)
 		return false
 	}
 	return true
-}
-
-// firstUnverified returns a human reason for an incomplete asset set: the first
-// missing/mismatched asset, or the platform-unsupported note.
-func firstUnverified(st assets.Status) string {
-	if st.ORTUnsupported {
-		return "no ONNX Runtime build for this platform"
-	}
-	for _, a := range st.Assets {
-		if !a.Verified {
-			if a.Reason != "" {
-				return a.Name + ": " + a.Reason
-			}
-			return a.Name + ": unverified"
-		}
-	}
-	return "incomplete"
 }
 
 // iceServers maps configured ICE servers to Pion's ICEServer list, carrying

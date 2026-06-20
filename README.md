@@ -2,7 +2,7 @@
 
 A server-first, web-first, multi-user **voice and text agent** (V2). Cross-platform from the first commit — Windows 11 x64, macOS Apple Silicon, and Linux x86_64 — with local and cloud STT-LLM-TTS, Docker `sbx` sandboxing, per-user secrets, and callable-agent Automations arriving across the phased roadmap.
 
-> **Status: Phase 4 (local TTS).** Phases 1–4 are complete: the cross-platform control plane, a React/Vite web client with streaming text chat, a **pure-Go WebRTC media bridge** (Pion), and now **local text-to-speech** — a Go port of the Supertonic 3 ONNX pipeline that speaks a typed message aloud over WebRTC. The ONNX Runtime is isolated behind an `onnx` build tag (CGo), so the **default build stays CGo-free** and cross-compiles everywhere; local TTS is an opt-in build plus a one-time `hina assets pull`. The default LLM provider is a credential-free **mock**, so it runs with no setup; point `[llm]` at OpenAI or a local llama.cpp server for a real model. See [`plans/roadmap.md`](plans/roadmap.md).
+> **Status: Phase 5 (local ASR).** Phases 1–5 are complete: the cross-platform control plane, a React/Vite web client with streaming text chat, a **pure-Go WebRTC media bridge** (Pion), **local text-to-speech** (a Go port of the Supertonic 3 ONNX pipeline), and now **local streaming speech-to-text** — a Go port of the Nemotron 3.5 streaming ASR pipeline that turns mic audio into live partial transcripts and a final, with **agent-name biasing** and **wake-word stripping**. Both ONNX runtimes are isolated behind an `onnx` build tag (CGo), so the **default build stays CGo-free** and cross-compiles everywhere; local voice is an opt-in build plus a one-time `hina assets pull`. The default LLM provider is a credential-free **mock**, so it runs with no setup; point `[llm]` at OpenAI or a local llama.cpp server for a real model. See [`plans/roadmap.md`](plans/roadmap.md).
 
 The full design lives in [`plans/`](plans/) — start with [`plans/roadmap.md`](plans/roadmap.md) (phase index), [`plans/hina-agent-plan.md`](plans/hina-agent-plan.md) (vision/architecture), and [`plans/research-findings.md`](plans/research-findings.md) (closed research + decisions). If you're an AI agent (or just changing code), read [`AGENTS.md`](AGENTS.md) first.
 
@@ -36,10 +36,15 @@ The control plane is **CGo-free** on purpose (no C toolchain for native Windows/
 
 **Phase 4 — Local TTS (Supertonic via ONNX Runtime)**
 
-- **`internal/onnx`** — a small, model-agnostic abstraction over ONNX Runtime shared by TTS now and ASR later: a `Backend`/`Session`/`Tensor` surface plus a reusable lazy-load + idle-unload `Lifecycle`. The real ORT binding ([`yalue/onnxruntime_go`](https://github.com/yalue/onnxruntime_go), pinned to ORT **1.26.0**) is CGo and lives behind the `onnx` build tag; the default build compiles a CGo-free stub that reports "unavailable."
+- **`internal/onnx`** — a small, model-agnostic abstraction over ONNX Runtime shared by TTS and ASR: a `Backend`/`Session`/`Tensor` (float32/int64/int32) surface plus a reusable lazy-load + idle-unload `Lifecycle`. The real ORT binding ([`yalue/onnxruntime_go`](https://github.com/yalue/onnxruntime_go), pinned to ORT **1.26.0**) is CGo and lives behind the `onnx` build tag; the default build compiles a CGo-free stub that reports "unavailable."
 - **`internal/tts`** — a faithful Go port of the Supertonic 3 pipeline: NFKD text prep + a codepoint tokenizer, a decimal-aware sentence splitter, JSON voice style-vectors, and the four ONNX graphs (duration → text-encode → 8-step flow-matching → vocoder) producing streaming 44.1 kHz speech. No phonemizer, no local HTTP TTS hop — preset voices only (no cloning).
-- **`internal/assets`** — the pinned download manager: ORT 1.26.0 per-OS + the Supertonic models (HF revision-pinned) with SHA256 verification and archive extraction, driven by `hina assets`.
+- **`internal/assets`** — the pinned download manager: ORT 1.26.0 per-OS + the Supertonic and Nemotron models (HF revision-pinned) with SHA256 verification and archive extraction, driven by `hina assets`.
 - **`internal/rtc` / `web/`** — a typed `SpeakText` control message and a server-driven `POST /api/v1/realtime/speak` synthesize a reply into the live session (44.1 kHz → 24 kHz, barge-in-aware); the `/live` page has a "Speak" box and admin shows the ORT version/provider/lib path + TTS load state + cold/warm latency.
+
+**Phase 5 — Local streaming ASR (Nemotron via ONNX Runtime)**
+
+- **`internal/asr`** — a pure-Go port of the Nemotron 3.5 streaming ASR pipeline: a NeMo-faithful **log-mel front-end** (preemphasis, a radix-2 FFT, a Slaney mel filterbank, log — no per-feature normalization, all in Go, not the graph), a **SentencePiece (unigram) tokenizer** with Viterbi encoding, a cache-aware **FastConformer encoder** streaming loop, an **RNNT greedy decoder** (2-layer LSTM prediction net + joint), and a SentencePiece detokenizer producing 16 kHz streaming partials + a final. Decode-time **agent-name biasing** (a token trie that boosts the configured name so "Hina" isn't mis-heard as "Nina") and a session-layer **wake-word strip** (remove a leading address before the request reaches the LLM) round it out. CGo-free; runs on `internal/onnx`.
+- **`internal/rtc` / `web/`** — typed `ListenStarted`/`ListenStopped` control messages route the live mic stream to the recognizer, emitting `ASRPartial` per chunk and an `ASRFinal` (with wake detection + the stripped request body) on commit; the `/live` page has a "Listen" control showing live partials + the final, and admin shows the ASR load state, language, biasing, and cold/chunk latency. (Turn boundaries here are client-driven; VAD lands in Phase 6.)
 
 ## Quick start
 
@@ -56,16 +61,16 @@ bin/hina server            # serve the UI + API on http://127.0.0.1:8733  (loopb
 
 Then open `http://127.0.0.1:8733`, log in with the bootstrap credential, and try **Chat** (text) or **Live** (mic → WebRTC loopback / tone). For frontend development with hot reload: `npm --prefix web run dev` (proxies `/api` to the Go server). `web/dist` is committed so `go build` works without a Node build; rerun the web build after changing `web/`.
 
-**Optional: local voice (Phase 4).** Local TTS needs the `onnx`-tagged build (links ONNX Runtime via CGo) plus the model assets:
+**Optional: local voice (Phases 4–5).** Local TTS and ASR need the `onnx`-tagged build (links ONNX Runtime via CGo) plus the model assets:
 
 ```bash
 make build-onnx            # -> bin/hina with the onnx tag (needs a C compiler; CGO_ENABLED=1)
-bin/hina assets pull       # download + checksum ORT 1.26.0 and the Supertonic models (~400 MB)
-# enable [tts] in config.toml (enabled = true), then:
-bin/hina server            # the Live page's "Speak" box now speaks replies aloud over WebRTC
+bin/hina assets pull       # download + checksum ORT 1.26.0, the Supertonic (~400 MB) and Nemotron (~680 MB) models
+# enable [tts] and/or [asr] in config.toml (enabled = true), then:
+bin/hina server            # the Live page's "Speak" box speaks replies aloud; "Listen" transcribes the mic
 ```
 
-`hina assets status` reports what's installed; `hina doctor` reports the ORT runtime + local-TTS availability. The default (CGo-free) build leaves local TTS unavailable and says so. Local voice on Windows is gated to Phase 11.
+`hina assets status` reports what's installed; `hina doctor` reports the ORT runtime + local-TTS/ASR availability. The default (CGo-free) build leaves local voice unavailable and says so. One `assets pull` installs both model sets, but TTS and ASR verify only their own assets — enable just one if you prefer. Local voice on Windows is gated to Phase 11.
 
 LAN binding (`--host 0.0.0.0` with `lan_enabled = true` / `HINA_SERVER_LAN=1`) is refused until the bootstrap admin password is changed. App state lives in OS-standard dirs (never repo-relative): config under `os.UserConfigDir()/hina`, data/DB under the platform data dir. Browser mic capture works on `localhost` without TLS; a second LAN device needs HTTPS with a real cert (configure `[server] tls_cert`/`tls_key`, or front it with a reverse proxy — `hina doctor` reports this).
 

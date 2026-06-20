@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/RenanQueiroz/hina-agent/internal/asr"
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/config"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
@@ -36,6 +37,7 @@ type Server struct {
 	provider llm.Provider
 	rtc      *rtc.Manager
 	tts      tts.Engine
+	asr      asr.Engine
 	logs     *logbuf.Buffer
 	log      *slog.Logger
 	ready    atomic.Bool
@@ -88,6 +90,10 @@ func (s *Server) SetRealtime(m *rtc.Manager) { s.rtc = m }
 // SetTTS installs the local TTS engine (post-construction). May be nil (TTS off);
 // the admin runtime view reports it as disabled/unavailable accordingly.
 func (s *Server) SetTTS(e tts.Engine) { s.tts = e }
+
+// SetASR installs the local ASR engine (post-construction). May be nil (ASR off);
+// the admin runtime view reports it as disabled/unavailable accordingly.
+func (s *Server) SetASR(e asr.Engine) { s.asr = e }
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()

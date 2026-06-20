@@ -23,8 +23,36 @@ type Config struct {
 	LLM      LLMConfig      `toml:"llm"`
 	Realtime RealtimeConfig `toml:"realtime"`
 	TTS      TTSConfig      `toml:"tts"`
+	ASR      ASRConfig      `toml:"asr"`
 	Paths    PathsConfig    `toml:"paths"`
 	Log      LogConfig      `toml:"log"`
+}
+
+// ASRConfig configures the local streaming speech-to-text engine (Phase 5,
+// Nemotron via ONNX Runtime). Off by default for the same reasons as TTS: it
+// needs the onnx-tagged build and the downloaded model assets. Name biasing +
+// wake-word stripping use [agent].name / name_aliases. The asset root is shared
+// with [tts] (one `hina assets pull` installs both); AssetsDir overrides it.
+type ASRConfig struct {
+	Enabled      bool    `toml:"enabled"`       // turn on local ASR (needs the onnx build + assets)
+	Language     string  `toml:"language"`      // default language tag, e.g. "en" or "auto"
+	IdleTTL      string  `toml:"idle_ttl"`      // unload models after this idle duration, e.g. "5m"
+	AssetsDir    string  `toml:"assets_dir"`    // override the model/runtime asset root (default: shared with [tts])
+	Threads      int     `toml:"threads"`       // ORT intra-op CPU threads (0 -> ORT default)
+	ContextScore float64 `toml:"context_score"` // name-biasing boost for a phrase's first token (0 -> default)
+	DepthScaling float64 `toml:"depth_scaling"` // name-biasing multiplier for deeper tokens (0 -> default)
+}
+
+// IdleTTLOr parses IdleTTL, falling back to def when empty or invalid.
+func (a ASRConfig) IdleTTLOr(def time.Duration) time.Duration {
+	if a.IdleTTL == "" {
+		return def
+	}
+	d, err := time.ParseDuration(a.IdleTTL)
+	if err != nil || d < 0 {
+		return def
+	}
+	return d
 }
 
 // TTSConfig configures the local text-to-speech engine (Phase 4, Supertonic via
@@ -40,15 +68,6 @@ type TTSConfig struct {
 	IdleTTL   string  `toml:"idle_ttl"`   // unload models after this idle duration, e.g. "5m"
 	AssetsDir string  `toml:"assets_dir"` // override the model/runtime asset root (default: cache dir)
 	Threads   int     `toml:"threads"`    // ORT intra-op CPU threads (0 -> ORT default)
-}
-
-// AssetsRoot resolves the local-inference asset root: the configured override, or
-// a models/ subdir of the given cache dir (model downloads belong in the cache).
-func (t TTSConfig) AssetsRoot(cacheDir string) string {
-	if t.AssetsDir != "" {
-		return t.AssetsDir
-	}
-	return filepath.Join(cacheDir, "models")
 }
 
 // IdleTTLOr parses IdleTTL, falling back to def when empty or invalid.
@@ -141,6 +160,22 @@ func Default() Config {
 	}
 }
 
+// AssetsRoot resolves the single local-inference asset root shared by TTS and
+// ASR: the first non-empty of [tts].assets_dir / [asr].assets_dir, else a
+// models/ subdir of the cache dir. One `hina assets pull` installs both model
+// sets here, and the server, doctor, and the assets CLI all resolve the same
+// root (Validate rejects divergent non-empty overrides). Each engine still
+// verifies only its own assets, so enabling just one is fine.
+func (c Config) AssetsRoot(cacheDir string) string {
+	if c.TTS.AssetsDir != "" {
+		return c.TTS.AssetsDir
+	}
+	if c.ASR.AssetsDir != "" {
+		return c.ASR.AssetsDir
+	}
+	return filepath.Join(cacheDir, "models")
+}
+
 // Load reads defaults, overlays the TOML file at path (if it exists), applies
 // HINA_* env overrides, and validates the result.
 func Load(path string) (Config, error) {
@@ -205,6 +240,15 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("HINA_TTS_ASSETS_DIR"); v != "" {
 		c.TTS.AssetsDir = v
+	}
+	if v := os.Getenv("HINA_ASR_ENABLED"); v != "" {
+		c.ASR.Enabled = v == "1" || v == "true"
+	}
+	if v := os.Getenv("HINA_ASR_LANGUAGE"); v != "" {
+		c.ASR.Language = v
+	}
+	if v := os.Getenv("HINA_ASR_ASSETS_DIR"); v != "" {
+		c.ASR.AssetsDir = v
 	}
 	if v := os.Getenv("HINA_REALTIME_ICE_SERVERS"); v != "" {
 		// Env is the simple STUN path: a comma-separated URL list, each its own
@@ -299,6 +343,26 @@ func (c Config) Validate() error {
 		if d, err := time.ParseDuration(c.TTS.IdleTTL); err != nil || d < 0 {
 			return fmt.Errorf("tts.idle_ttl %q must be a non-negative duration (e.g. \"5m\")", c.TTS.IdleTTL)
 		}
+	}
+	if c.ASR.Threads < 0 {
+		return fmt.Errorf("asr.threads %d must be >= 0", c.ASR.Threads)
+	}
+	if c.ASR.ContextScore < 0 {
+		return fmt.Errorf("asr.context_score %v must be >= 0 (0 for the default)", c.ASR.ContextScore)
+	}
+	if c.ASR.DepthScaling < 0 {
+		return fmt.Errorf("asr.depth_scaling %v must be >= 0 (0 for the default)", c.ASR.DepthScaling)
+	}
+	if c.ASR.IdleTTL != "" {
+		if d, err := time.ParseDuration(c.ASR.IdleTTL); err != nil || d < 0 {
+			return fmt.Errorf("asr.idle_ttl %q must be a non-negative duration (e.g. \"5m\")", c.ASR.IdleTTL)
+		}
+	}
+	// TTS and ASR share one asset root (one `hina assets pull` installs both, and
+	// the CLI/server/doctor resolve a single root). Divergent overrides would
+	// silently install to one dir while a server looked in another, so reject them.
+	if c.TTS.AssetsDir != "" && c.ASR.AssetsDir != "" && c.TTS.AssetsDir != c.ASR.AssetsDir {
+		return fmt.Errorf("tts.assets_dir (%q) and asr.assets_dir (%q) must match — TTS and ASR share one asset root", c.TTS.AssetsDir, c.ASR.AssetsDir)
 	}
 	for _, srv := range c.Realtime.ICEServers {
 		if len(srv.URLs) == 0 {

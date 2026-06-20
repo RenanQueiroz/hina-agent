@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Mic, MicOff, MessageSquare, Radio, Square, Volume2 } from "lucide-react";
+import { Ear, Mic, MicOff, MessageSquare, Radio, Square, Volume2 } from "lucide-react";
 import { LiveSession, type LiveState } from "../lib/rtc";
 import { Button, Card } from "../components/ui";
 
@@ -148,6 +148,49 @@ export function LivePage() {
         </div>
       </Card>
 
+      <Card className="mb-4 p-4">
+        <h2 className="mb-2 text-sm font-semibold text-zinc-600 dark:text-zinc-300">
+          Listen (local ASR)
+        </h2>
+        <div className="flex flex-wrap items-center gap-2">
+          {!state.listening ? (
+            <Button
+              disabled={state.status !== "connected"}
+              onClick={() => sessionRef.current?.startListen()}
+            >
+              <Ear size={16} /> Start listening
+            </Button>
+          ) : (
+            <Button variant="danger" onClick={() => sessionRef.current?.stopListen()}>
+              <Square size={16} /> Stop &amp; transcribe
+            </Button>
+          )}
+          <span className="text-xs text-zinc-400">
+            Requires local ASR enabled on the server ([asr] + onnx build + assets).
+          </span>
+        </div>
+        {state.listening && (
+          <p className="mt-3 min-h-[1.25rem] text-sm italic text-zinc-500">
+            {state.partial ? state.partial : "Listening…"}
+          </p>
+        )}
+        {!state.listening && state.transcript !== undefined && (
+          <div className="mt-3">
+            <p className="text-sm text-zinc-800 dark:text-zinc-200">
+              {state.transcript || <span className="text-zinc-400">(no speech detected)</span>}
+            </p>
+            {state.wakeDetected && (
+              <p className="mt-1 text-xs text-indigo-500">Agent addressed (wake word detected).</p>
+            )}
+            {state.transcriptTruncated && (
+              <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                {truncationNote(state.transcriptTruncationReason)}
+              </p>
+            )}
+          </div>
+        )}
+      </Card>
+
       <Card className="p-4">
         <h2 className="mb-2 text-sm font-semibold text-zinc-600 dark:text-zinc-300">Session</h2>
         <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
@@ -170,6 +213,20 @@ export function LivePage() {
       </Card>
     </div>
   );
+}
+
+// truncationNote explains why a transcript was cut short server-side.
+function truncationNote(reason?: string): string {
+  switch (reason) {
+    case "dropped":
+      return "Some audio was dropped under load — this transcript may be incomplete.";
+    case "max_duration":
+      return "The segment hit the maximum listening duration — this transcript may be incomplete.";
+    case "capped":
+      return "The segment reached its processing limit — this transcript may be incomplete.";
+    default:
+      return "This transcript may be incomplete.";
+  }
 }
 
 function Stat({ label, value }: { label: string; value: string }) {

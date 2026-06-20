@@ -46,11 +46,30 @@ func TestValidateTTS(t *testing.T) {
 	if got := (TTSConfig{}).IdleTTLOr(time.Minute); got != time.Minute {
 		t.Fatalf("empty IdleTTLOr = %v, want default 1m", got)
 	}
-	if got := (TTSConfig{}).AssetsRoot("/cache"); got != filepath.Join("/cache", "models") {
+	// The single shared asset root: default models/ dir, or whichever engine's
+	// override is set (TTS preferred, then ASR).
+	if got := (Config{}).AssetsRoot("/cache"); got != filepath.Join("/cache", "models") {
 		t.Fatalf("AssetsRoot default = %q", got)
 	}
-	if got := (TTSConfig{AssetsDir: "/custom"}).AssetsRoot("/cache"); got != "/custom" {
-		t.Fatalf("AssetsRoot override = %q, want /custom", got)
+	if got := (Config{TTS: TTSConfig{AssetsDir: "/custom"}}).AssetsRoot("/cache"); got != "/custom" {
+		t.Fatalf("AssetsRoot tts override = %q, want /custom", got)
+	}
+	if got := (Config{ASR: ASRConfig{AssetsDir: "/asr"}}).AssetsRoot("/cache"); got != "/asr" {
+		t.Fatalf("AssetsRoot asr override = %q, want /asr", got)
+	}
+}
+
+func TestValidateRejectsDivergentAssetsDir(t *testing.T) {
+	c := Default()
+	c.TTS.AssetsDir = "/a"
+	c.ASR.AssetsDir = "/b"
+	if err := c.Validate(); err == nil {
+		t.Fatal("divergent tts/asr assets_dir must be rejected")
+	}
+	// Equal dirs are fine.
+	c.ASR.AssetsDir = "/a"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("matching assets_dir should validate: %v", err)
 	}
 }
 

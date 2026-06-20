@@ -64,6 +64,18 @@ const (
 	TypeRuntimeModelError    = "RuntimeModelError"
 )
 
+// Phase 5 local-ASR event types. ListenStarted/ListenStopped are the
+// client→server controls that delimit a speech segment (turn boundaries are
+// Phase 6's VAD; here the client marks them). While listening, the server emits
+// ASRPartial per decoded chunk and one ASRFinal on the segment commit, carrying
+// the wake-detection result + the address-stripped request body.
+const (
+	TypeListenStarted = "ListenStarted" // client->server: begin feeding mic audio to ASR
+	TypeListenStopped = "ListenStopped" // client->server: commit the segment -> ASRFinal
+	TypeASRPartial    = "ASRPartial"
+	TypeASRFinal      = "ASRFinal"
+)
+
 // Event is the typed envelope. JSON field names are the wire contract; note
 // ConversationID serializes as "session_id" (the product-level "session").
 type Event struct {

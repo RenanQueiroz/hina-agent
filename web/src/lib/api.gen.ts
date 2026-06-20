@@ -117,6 +117,25 @@ export interface RTCStats {
 export interface AdminRuntime {
   llm_provider: string;
   tts: TTSRuntime;
+  asr: ASRRuntime;
+}
+/**
+ * ASRRuntime is the local streaming ASR (Nemotron) engine + ONNX runtime status
+ * for the admin view.
+ */
+export interface ASRRuntime {
+  enabled: boolean;
+  available: boolean;
+  loaded: boolean; // models currently resident (warm)
+  language: string;
+  biasing: boolean; // agent-name biasing active
+  reason?: string;
+  runtime: ORTRuntime;
+  cold_load_ms: number /* int64 */; // last cold model-load latency
+  last_chunk_ms: number /* int64 */; // last chunk decode latency
+  chunk_count: number /* int64 */;
+  error_count: number /* int64 */;
+  last_error?: string;
 }
 /**
  * TTSRuntime is the local TTS engine + ONNX runtime status for the admin view.

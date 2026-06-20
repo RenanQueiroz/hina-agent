@@ -74,11 +74,16 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 		r.add("https cert", "unavailable", "no cert configured (localhost mic is fine; LAN mic needs HTTPS — see mkcert/reverse-proxy guidance)")
 	}
 
-	// Shared ONNX runtime + local TTS (Phase 4). In the default CGo-free build the
-	// runtime is the stub (unavailable); the onnx-tagged build links ORT and loads
-	// it from the app-managed lib dir. Local TTS needs both the runtime and the
-	// downloaded Supertonic assets.
-	root := cfg.TTS.AssetsRoot(paths.Cache)
+	// Shared ONNX runtime + local TTS/ASR (Phases 4–5). In the default CGo-free
+	// build the runtime is the stub (unavailable); the onnx-tagged build links ORT
+	// and loads it from the app-managed lib dir. TTS and ASR share one asset root
+	// but each verifies ONLY its own models, so a TTS-only (or ASR-only) install is
+	// reported correctly rather than dragged down by the other engine's assets.
+	root := cfg.AssetsRoot(paths.Cache)
+	// ORTAsset's bool is "supported" (true on linux/amd64 + darwin/arm64); invert
+	// it for the unsupported-platform branch.
+	_, ortSupported := assets.ORTAsset(runtime.GOOS, runtime.GOARCH)
+	ortUnsupported := !ortSupported
 	// Make the root owner-private AND verify the ORT library's checksum BEFORE
 	// constructing the backend, so this command never dlopens a stale/corrupted/
 	// swapped native library from a writable-by-others location, and load the EXACT
@@ -103,18 +108,35 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 		r.add("onnx runtime", "unavailable", reason)
 	}
 
-	as := assets.Verify(root, runtime.GOOS, runtime.GOARCH)
+	// Local TTS (Phase 4) — gated on the ORT runtime + the Supertonic assets ONLY.
+	ttsOK, ttsReason := assets.SupertonicVerified(root)
 	switch {
-	case as.ORTUnsupported:
+	case ortUnsupported:
 		r.add("local tts (supertonic)", "unavailable", "no ONNX Runtime build for this platform (Windows local voice gated to Phase 11)")
 	case !cfg.TTS.Enabled:
 		r.add("local tts (supertonic)", "unavailable", "disabled: set [tts] enabled=true, build with -tags onnx, and run 'hina assets pull'")
 	case !info.Available:
 		r.add("local tts (supertonic)", "unavailable", "onnx runtime not linked (build with -tags onnx)")
-	case !as.Complete:
-		r.add("local tts (supertonic)", "unavailable", "model assets not installed (run: hina assets pull)")
+	case !ttsOK:
+		r.add("local tts (supertonic)", "unavailable", "model assets not installed (run: hina assets pull): "+ttsReason)
 	default:
 		r.add("local tts (supertonic)", "ok", "Supertonic models installed; runtime linked")
+	}
+
+	// Local streaming ASR (Phase 5, Nemotron). Same shared ONNX runtime; gated on
+	// the ORT runtime + the Nemotron assets ONLY. Windows stays gated to Phase 11.
+	asrOK, asrReason := assets.ASRVerified(root)
+	switch {
+	case ortUnsupported:
+		r.add("local asr (nemotron)", "unavailable", "no ONNX Runtime build for this platform (Windows local voice gated to Phase 11)")
+	case !cfg.ASR.Enabled:
+		r.add("local asr (nemotron)", "unavailable", "disabled: set [asr] enabled=true, build with -tags onnx, and run 'hina assets pull'")
+	case !info.Available:
+		r.add("local asr (nemotron)", "unavailable", "onnx runtime not linked (build with -tags onnx)")
+	case !asrOK:
+		r.add("local asr (nemotron)", "unavailable", "model assets not installed (run: hina assets pull): "+asrReason)
+	default:
+		r.add("local asr (nemotron)", "ok", "Nemotron models installed; runtime linked")
 	}
 
 	return r

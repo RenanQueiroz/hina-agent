@@ -48,6 +48,7 @@ export function AdminPage() {
       </Card>
 
       <RuntimePanel />
+      <ASRRuntimePanel />
 
       <Card className="p-4">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">Users</h2>
@@ -122,6 +123,72 @@ function RuntimePanel() {
             <>
               <dt className="text-zinc-500">Last error</dt>
               <dd className="text-red-500">{tts.last_error}</dd>
+            </>
+          )}
+        </dl>
+      )}
+    </Card>
+  );
+}
+
+// ASRRuntimePanel shows the local streaming ASR (Nemotron) engine: ONNX Runtime,
+// load state, language, name-biasing, and cold/chunk latency (Phase 5).
+function ASRRuntimePanel() {
+  const rt = useQuery({
+    queryKey: ["admin", "runtime"],
+    queryFn: api.adminRuntime,
+    refetchInterval: 5000,
+  });
+  const asr = rt.data?.asr;
+  const ort = asr?.runtime;
+  const status = !asr?.enabled
+    ? "disabled"
+    : asr?.available
+      ? asr.loaded
+        ? "loaded (warm)"
+        : "ready (idle)"
+      : "unavailable";
+  return (
+    <Card className="p-4">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">
+        Local ASR runtime
+      </h2>
+      {rt.isLoading ? (
+        <Spinner />
+      ) : (
+        <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-sm">
+          <dt className="text-zinc-500">Status</dt>
+          <dd>{status}</dd>
+          <dt className="text-zinc-500">ONNX Runtime</dt>
+          <dd>
+            {ort?.available ? (
+              `${ort.version} (${ort.provider})`
+            ) : (
+              <span className="text-zinc-400">{ort?.reason || "not linked"}</span>
+            )}
+          </dd>
+          <dt className="text-zinc-500">Language</dt>
+          <dd>{asr?.language || "—"}</dd>
+          <dt className="text-zinc-500">Name biasing</dt>
+          <dd>{asr?.biasing ? "on" : "off"}</dd>
+          <dt className="text-zinc-500">Cold load</dt>
+          <dd>{asr?.cold_load_ms ? `${asr.cold_load_ms} ms` : "—"}</dd>
+          <dt className="text-zinc-500">Last chunk</dt>
+          <dd>{asr?.last_chunk_ms ? `${asr.last_chunk_ms} ms` : "—"}</dd>
+          <dt className="text-zinc-500">Chunks / errors</dt>
+          <dd>
+            {asr?.chunk_count ?? 0} / {asr?.error_count ?? 0}
+          </dd>
+          {asr?.reason && !asr.available && (
+            <>
+              <dt className="text-zinc-500">Reason</dt>
+              <dd className="text-amber-600 dark:text-amber-400">{asr.reason}</dd>
+            </>
+          )}
+          {asr?.last_error && (
+            <>
+              <dt className="text-zinc-500">Last error</dt>
+              <dd className="text-red-500">{asr.last_error}</dd>
             </>
           )}
         </dl>

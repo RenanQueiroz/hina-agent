@@ -271,6 +271,68 @@ describe("LiveSession TTS completion", () => {
   });
 });
 
+describe("LiveSession ASR segments", () => {
+  it("ignores a stale ASRFinal/partial from a previous segment", () => {
+    const states: Array<{ listening?: boolean; transcript?: string; partial?: string }> = [];
+    const s = new LiveSession((st) => states.push(st)) as unknown as {
+      onControl: (data: string) => void;
+    };
+    // Segment 0 starts, then segment 1 starts (e.g. the prior one was still
+    // finalizing server-side when the user started the next).
+    s.onControl(JSON.stringify({ type: "ListenStarted", payload: { seg: 0 } }));
+    s.onControl(JSON.stringify({ type: "ListenStarted", payload: { seg: 1 } }));
+    expect(states.at(-1)?.listening).toBe(true);
+
+    // A stale partial + final for segment 0 arrive late: both must be ignored so
+    // the active segment 1's UI is neither cleared nor shown the old transcript.
+    s.onControl(JSON.stringify({ type: "ASRPartial", payload: { seg: 0, text: "stale partial" } }));
+    s.onControl(JSON.stringify({ type: "ASRFinal", payload: { seg: 0, text: "stale final" } }));
+    expect(states.at(-1)?.listening).toBe(true);
+    expect(states.at(-1)?.transcript).toBeUndefined();
+    expect(states.at(-1)?.partial).not.toBe("stale partial");
+
+    // Segment 1's own final commits and clears listening.
+    s.onControl(JSON.stringify({ type: "ASRFinal", payload: { seg: 1, text: "real" } }));
+    expect(states.at(-1)?.listening).toBe(false);
+    expect(states.at(-1)?.transcript).toBe("real");
+  });
+
+  it("clears listening state on close so the control is usable after reconnect", async () => {
+    const states: Array<{ listening?: boolean; partial?: string }> = [];
+    const s = new LiveSession((st) => states.push(st)) as unknown as {
+      onControl: (data: string) => void;
+      close: () => Promise<void>;
+    };
+    // An active listening segment when the call ends (no terminal event arrives).
+    s.onControl(JSON.stringify({ type: "ListenStarted", payload: { seg: 0 } }));
+    s.onControl(JSON.stringify({ type: "ASRPartial", payload: { seg: 0, text: "half a sen" } }));
+    expect(states.at(-1)?.listening).toBe(true);
+
+    await s.close();
+    // listening must be cleared so the Live page shows "Start listening" again.
+    expect(states.at(-1)?.listening).toBe(false);
+    expect(states.at(-1)?.partial).toBe("");
+  });
+
+  it("clears listening even if AudioContext.close never settles", () => {
+    const states: Array<{ listening?: boolean; status?: string }> = [];
+    const s = new LiveSession((st) => states.push(st)) as unknown as {
+      onControl: (data: string) => void;
+      close: () => Promise<void>;
+      ctx?: { state: string; close: () => Promise<void> };
+    };
+    // An AudioContext whose close() never resolves (the documented hang case).
+    s.ctx = { state: "running", close: () => new Promise<void>(() => {}) };
+    s.onControl(JSON.stringify({ type: "ListenStarted", payload: { seg: 0 } }));
+    expect(states.at(-1)?.listening).toBe(true);
+
+    void s.close(); // do NOT await — it hangs on the never-settling AudioContext.close
+    // The state must already be settled (patched before the hanging await).
+    expect(states.at(-1)?.listening).toBe(false);
+    expect(states.at(-1)?.status).toBe("closed");
+  });
+});
+
 describe("LiveSession speak", () => {
   it("sends a SpeakText control envelope with the text/voice/lang", () => {
     const s = new LiveSession(() => {}) as unknown as {

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/RenanQueiroz/hina-agent/internal/asr"
 	"github.com/RenanQueiroz/hina-agent/internal/audio"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/tts"
@@ -26,6 +27,7 @@ type Session struct {
 	log            *slog.Logger
 	sink           EventSink
 	tts            tts.Engine // optional local speech engine (nil/unavailable -> SpeakText rejected)
+	asr            asr.Engine // optional local recognition engine (nil/unavailable -> ListenStarted rejected)
 
 	start  time.Time // monotonic reference for send timestamps / cursors
 	ctx    context.Context
@@ -55,6 +57,14 @@ type Session struct {
 	speakMu     sync.Mutex         // guards speakCancel + speakGen
 	speakCancel context.CancelFunc // cancels the in-flight spoken reply, if any
 	speakGen    uint64             // arrival generation: a speak only commits if it's still current
+
+	asrMu       sync.Mutex  // guards asrStream + asrStarting + listenGen + activeSeg + listenTimer + asrDropped
+	asrStream   asr.Stream  // non-nil while a listening segment is active
+	asrStarting bool        // a NewStream (possibly cold-loading) is in flight
+	listenGen   uint64      // bumped by stop/close to invalidate an in-flight start (cold-load race)
+	activeSeg   uint64      // id of the installed segment, tagged on every ASR event for that segment
+	listenTimer *time.Timer // per-segment max-duration timer; auto-finalizes a never-stopped segment
+	asrDropped  int64       // mic frames dropped this segment under recognizer backpressure (transcript is incomplete)
 }
 
 // maxControlBytes bounds a single events-channel control message. Control frames
@@ -77,7 +87,7 @@ func (s *Session) channelsOpen() bool {
 		a.ReadyState() == webrtc.DataChannelStateOpen
 }
 
-func newSession(sid, userID, conversationID string, pc *webrtc.PeerConnection, log *slog.Logger, sink EventSink, engine tts.Engine) *Session {
+func newSession(sid, userID, conversationID string, pc *webrtc.PeerConnection, log *slog.Logger, sink EventSink, engine tts.Engine, recog asr.Engine) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
 		id:             sid,
@@ -87,6 +97,7 @@ func newSession(sid, userID, conversationID string, pc *webrtc.PeerConnection, l
 		log:            log.With("session", sid, "user", userID),
 		sink:           sink,
 		tts:            engine,
+		asr:            recog,
 		start:          time.Now(),
 		ctx:            ctx,
 		cancel:         cancel,
@@ -285,6 +296,22 @@ func (s *Session) handleControlMessage(msg webrtc.DataChannelMessage) {
 			return
 		}
 		s.speak(p.Text, tts.Options{Voice: p.Voice, Lang: p.Lang})
+	case events.TypeListenStarted:
+		var p struct {
+			Language string `json:"language"`
+		}
+		if json.Unmarshal(e.Payload, &p) != nil {
+			return
+		}
+		// Reserve the segment + capture the generation SYNCHRONOUSLY on this
+		// (serial) control goroutine so a ListenStopped delivered right after can't
+		// overtake the reservation; the slow model load then runs off-goroutine so
+		// it never stalls other control messages.
+		if gen, ok := s.beginListen(); ok {
+			go s.finishListen(p.Language, gen)
+		}
+	case events.TypeListenStopped:
+		s.stopListen()
 	case events.TypeUserInterrupted:
 		var p struct {
 			Epoch         uint32 `json:"epoch"`
@@ -397,8 +424,13 @@ func (s *Session) Close() {
 	s.closed.Store(true)
 	s.commitMu.Unlock()
 	s.closeOnce.Do(func() {
-		s.cancelSpeak() // invalidate any pending speak so it can't start after teardown
+		// Cancel the session context FIRST: it propagates to every ASR stream
+		// (their lifetimes derive from it), so any in-flight recognizer work
+		// unblocks before closeListen waits on asrMu — teardown can never wedge
+		// behind a busy ASR stream.
 		s.cancel()
+		s.cancelSpeak() // invalidate any pending speak so it can't start after teardown
+		s.closeListen() // tear down any active ASR stream (releases the model bundle)
 		s.out.stop()
 		if err := s.pc.Close(); err != nil {
 			s.log.Debug("rtc: close peer connection", "err", err)

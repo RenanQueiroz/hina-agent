@@ -33,10 +33,15 @@ var ErrUnavailable = errors.New("onnx: runtime unavailable (build with -tags onn
 // row-major (C order) matching the Shape. The slice is owned by the caller on
 // input and by the caller on output (the backend copies at the boundary so no
 // Go slice aliases ORT-owned C memory after Run returns).
+//
+// Int32 exists alongside Int64 because some graphs distinguish them: the
+// Nemotron RNNT decoder_joint takes int32 `targets`/`target_length` and emits an
+// int32 `prednet_lengths`, while the encoder uses int64 lengths/`prompt_index`.
 type Tensor struct {
 	Shape   []int64
 	Float32 []float32 // set iff Dtype()==Float32
 	Int64   []int64   // set iff Dtype()==Int64
+	Int32   []int32   // set iff Dtype()==Int32
 }
 
 // Dtype identifies a tensor's element type.
@@ -46,6 +51,7 @@ const (
 	DtypeUnknown Dtype = iota
 	DtypeFloat32
 	DtypeInt64
+	DtypeInt32
 )
 
 // Dtype reports the populated element type.
@@ -55,6 +61,8 @@ func (t Tensor) Dtype() Dtype {
 		return DtypeFloat32
 	case t.Int64 != nil:
 		return DtypeInt64
+	case t.Int32 != nil:
+		return DtypeInt32
 	default:
 		return DtypeUnknown
 	}
@@ -68,6 +76,11 @@ func NewFloat32(shape []int64, data []float32) Tensor {
 // NewInt64 builds an int64 tensor. len(data) must equal the product of shape.
 func NewInt64(shape []int64, data []int64) Tensor {
 	return Tensor{Shape: shape, Int64: data}
+}
+
+// NewInt32 builds an int32 tensor. len(data) must equal the product of shape.
+func NewInt32(shape []int64, data []int32) Tensor {
+	return Tensor{Shape: shape, Int32: data}
 }
 
 // Elements is the flattened element count implied by Shape (product of dims, 1
@@ -93,8 +106,12 @@ func (t Tensor) Validate() error {
 		if int64(len(t.Int64)) != n {
 			return fmt.Errorf("onnx: int64 tensor has %d elements, shape %v implies %d", len(t.Int64), t.Shape, n)
 		}
+	case DtypeInt32:
+		if int64(len(t.Int32)) != n {
+			return fmt.Errorf("onnx: int32 tensor has %d elements, shape %v implies %d", len(t.Int32), t.Shape, n)
+		}
 	default:
-		return errors.New("onnx: tensor has no populated data (neither Float32 nor Int64)")
+		return errors.New("onnx: tensor has no populated data (Float32, Int64, or Int32)")
 	}
 	return nil
 }

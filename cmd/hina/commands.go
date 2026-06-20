@@ -16,9 +16,10 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/platform"
 )
 
-// assetsRoot resolves the local-inference asset root for the app's paths.
+// assetsRoot resolves the single local-inference asset root for the app's paths
+// (shared by TTS + ASR, per config.AssetsRoot).
 func assetsRoot(cfg config.Config, paths platform.Paths) string {
-	return cfg.TTS.AssetsRoot(paths.Cache)
+	return cfg.AssetsRoot(paths.Cache)
 }
 
 // cmdAssets manages the pinned local-inference downloads (ONNX Runtime + the
@@ -73,7 +74,7 @@ func cmdAssets(args []string) error {
 
 func printAssetStatus(st assets.Status) {
 	fmt.Printf("Local-inference assets (root: %s)\n", st.Root)
-	fmt.Printf("  ONNX Runtime %s / Supertonic %s\n\n", assets.ORTVersion, assets.SupertonicRevision[:12])
+	fmt.Printf("  ONNX Runtime %s / Supertonic %s / Nemotron %s\n\n", assets.ORTVersion, assets.SupertonicRevision[:12], assets.NemotronRevision[:12])
 	if st.ORTUnsupported {
 		fmt.Println("  [unsupported] no ONNX Runtime CPU build for this platform — local TTS unavailable here")
 	}
@@ -248,6 +249,20 @@ lang = "en"         # default language tag
 # idle_ttl = "5m"   # unload models after this idle period (keeps memory bounded)
 # threads = 0       # ORT intra-op CPU threads (0 = ORT default)
 # assets_dir = ""   # override the model/runtime asset root (default: OS cache dir)
+
+[asr]
+# Local streaming speech-to-text (Phase 5, Nemotron via ONNX Runtime). Off by
+# default; usable only in the onnx-tagged build with the model assets installed
+# ("hina assets pull"). Name biasing + wake-word stripping use [agent].name /
+# name_aliases, so the agent name transcribes reliably and a leading address is
+# removed before the request reaches the LLM.
+enabled = false
+language = "auto"     # default language tag ("en", "es", ..., or "auto" to detect)
+# idle_ttl = "5m"     # unload models after this idle period
+# threads = 0         # ORT intra-op CPU threads (0 = ORT default)
+# context_score = 1.0 # name-biasing boost for a phrase's first token (tune on fixtures)
+# depth_scaling = 2.0 # name-biasing multiplier for deeper tokens
+# assets_dir = ""     # override the asset root (default: shared with [tts])
 
 # [paths]  # optional overrides of the OS-resolved app directories
 # data_dir = "/var/lib/hina"

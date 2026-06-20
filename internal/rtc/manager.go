@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RenanQueiroz/hina-agent/internal/asr"
 	"github.com/RenanQueiroz/hina-agent/internal/id"
 	"github.com/RenanQueiroz/hina-agent/internal/tts"
 	"github.com/pion/interceptor"
@@ -43,6 +44,7 @@ type Manager struct {
 	log        *slog.Logger
 	sink       EventSink
 	tts        tts.Engine // optional local speech engine, shared across sessions
+	asr        asr.Engine // optional local recognition engine, shared across sessions
 
 	mu        sync.Mutex
 	sessions  map[string]*Session           // userID -> active (committed) session
@@ -89,6 +91,7 @@ func NewManager(cfg Config, sink EventSink) (*Manager, error) {
 		log:        log,
 		sink:       sink,
 		tts:        cfg.TTS,
+		asr:        cfg.ASR,
 		sessions:   make(map[string]*Session),
 		pending:    make(map[string]*Session),
 		userGen:    make(map[string]uint64),
@@ -278,7 +281,7 @@ func (mgr *Manager) newSession(ctx context.Context, userID, conversationID, offe
 	if err != nil {
 		return nil, "", fmt.Errorf("rtc: new peer connection: %w", err)
 	}
-	s := newSession(id.New("rtc"), userID, conversationID, pc, mgr.log, mgr.sink, mgr.tts)
+	s := newSession(id.New("rtc"), userID, conversationID, pc, mgr.log, mgr.sink, mgr.tts, mgr.asr)
 	s.onClose = func() { mgr.onSessionClosed(s) }
 	s.onReady = func() { mgr.Commit(s.id) } // commit when the control channel opens
 	s.wire()

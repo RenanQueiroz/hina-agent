@@ -88,9 +88,11 @@ func (in *inbound) readLoop(track *webrtc.TrackRemote) {
 // it can be unit-tested with synthetic PCM (no Opus encoder needed).
 func (in *inbound) processPCM48(pcm []float32) {
 	if in.rsASR != nil {
-		if asr, err := in.rsASR.Process(pcm); err == nil {
-			in.captureSamples += int64(len(asr))
-			// Phase 6 attaches the ASR consumer here; Phase 3 only meters.
+		if asr16k, err := in.rsASR.Process(pcm); err == nil {
+			in.captureSamples += int64(len(asr16k))
+			// Route to the recognizer when a listening segment is active (Phase 5);
+			// a no-op otherwise. Turn boundaries are client-driven here, VAD in Phase 6.
+			in.s.feedASR(asr16k)
 		} else {
 			in.s.log.Debug("rtc: ASR resample", "err", err)
 		}

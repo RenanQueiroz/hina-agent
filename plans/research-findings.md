@@ -63,6 +63,13 @@ Cache-aware **FastConformer encoder (24-layer, d_model 1024) + RNNT (2-layer LST
 - Risk: faithfully reproducing the NeMo log-mel front-end in Go — small numerical mismatches degrade WER more than decode bugs. Build a fixture that compares Go front-end output to a reference NeMo/parakeet-rs feature dump.
 - Refs: huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b, huggingface.co/smcleod/..., github.com/altunenes/parakeet-rs.
 
+> **Corrections (Phase 5 implementation, 2026-06-20):** re-verified against the live repo + the `parakeet-rs` reference and confirmed in `internal/asr`.
+> - **Repo/files:** the primary export is `smcleod/nemotron-3.5-asr-streaming-0.6b-int8` (commit `f1f26d2`): `encoder.onnx` **with an external `encoder.onnx.data` weights file**, the combined `decoder_joint.onnx`, and `tokenizer.model`. We do **not** ship `config.json` — the prompt dictionary + dims are embedded in Go.
+> - **Front-end normalization is OFF.** config.json's `preprocessor.normalize == "NA"` and the reference both feed **raw** log-mel to the encoder (no per-feature mean/var). This is the single most load-bearing front-end detail. STFT uses center zero-padding (`n_fft/2`) and a symmetric (periodic=False) Hann; log guard is `ln(x + 2^-24)`.
+> - **Tokenizer is SentencePiece UNIGRAM** (13087 pieces; blank = 13087, so 13088 joint logits). Building the bias trie needs Viterbi encoding (piece scores), implemented in Go.
+> - **Decoder dtypes:** `decoder_joint.onnx` takes **int32** `targets`/`target_length` (the encoder uses int64) — `internal/onnx` gained an int32 tensor type for this.
+> - **External-data load:** the `yalue` binding exposes no in-memory external-data API, so the encoder loads by its checksum-verified **path** (ORT finds `encoder.onnx.data` beside it) while the self-contained decoder + tokenizer load from verified bytes. The owner-private asset root (SecureRoot) bounds the residual to a same-user verify→open swap.
+
 ### B4. Silero VAD in Go — GREEN
 Official `silero_vad.onnx`: inputs `input`[1,512], `state`[2,1,128] LSTM carry, `sr` int64; outputs speech prob + `stateN`. 512-sample window @16 kHz (32 ms), stateful, in-order. Run it through the **same `yalue` ORT binding** (wrap the model directly rather than adopting a wrapper pinned to a different ORT version, e.g. `streamer45/silero-vad-go`). MIT licensed. (Pure-Go fallback if "no CGo" ever became hard: a hand-written energy VAD — adequate only for silence-gating, not robust speech discrimination.)
 - Refs: github.com/snakers4/silero-vad (MIT, v6.x).

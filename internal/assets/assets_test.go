@@ -36,8 +36,8 @@ func TestManifestPlatform(t *testing.T) {
 	if unsupported {
 		t.Fatal("linux/amd64 should be supported")
 	}
-	if len(list) != 1+len(SupertonicAssets()) {
-		t.Fatalf("manifest has %d assets, want %d", len(list), 1+len(SupertonicAssets()))
+	if want := 1 + len(SupertonicAssets()) + len(NemotronAssets()); len(list) != want {
+		t.Fatalf("manifest has %d assets, want %d (ORT + Supertonic + Nemotron)", len(list), want)
 	}
 	if _, unsup := Manifest("darwin", "amd64"); !unsup {
 		t.Fatal("darwin/amd64 manifest should flag ORT unsupported")
@@ -203,6 +203,38 @@ func TestLayout(t *testing.T) {
 		onnx != filepath.Join("/root", "supertonic", "onnx") ||
 		voice != filepath.Join("/root", "supertonic", "voice_styles") {
 		t.Fatalf("layout = %s %s %s", lib, onnx, voice)
+	}
+	if got := ASRDir("/root"); got != filepath.Join("/root", "nemotron") {
+		t.Fatalf("ASRDir = %s", got)
+	}
+	if got := ASREncoderPath("/root"); got != filepath.Join("/root", "nemotron", "encoder.onnx") {
+		t.Fatalf("ASREncoderPath = %s", got)
+	}
+}
+
+func TestASRVerified(t *testing.T) {
+	// Nothing installed -> not verified, with a reason naming the first asset.
+	if ok, reason := ASRVerified(t.TempDir()); ok || reason == "" {
+		t.Fatalf("empty root: ok=%v reason=%q, want not-verified + reason", ok, reason)
+	}
+	// A size-matching but wrong-checksum encoder must not verify (checksum gate).
+	root := t.TempDir()
+	var enc supModel
+	for _, m := range nemoModels {
+		if m.path == "encoder.onnx" {
+			enc = m
+		}
+	}
+	dest := filepath.Join(root, enc.dest)
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Use a small placeholder (size won't match the real 42 MB) -> size mismatch.
+	if err := os.WriteFile(dest, []byte("not the real encoder"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := ASRVerified(root); ok || reason == "" {
+		t.Fatalf("wrong encoder: ok=%v reason=%q, want not-verified", ok, reason)
 	}
 }
 

@@ -13,10 +13,15 @@ import (
 
 // Pins. ORT 1.26.0 is the release the yalue v1.31.0 binding's C API (v26)
 // requires; the Supertonic revision is the HF main commit these checksums match.
+// The Nemotron revision is the smcleod int8 export commit (the primary ASR model
+// per research-findings B3/B10: combined decoder_joint, full chunk range,
+// OpenMDW-1.1) these checksums match.
 const (
 	ORTVersion         = "1.26.0"
 	SupertonicRevision = "3cadd1ee6394adea1bd021217a0e650ede09a323"
+	NemotronRevision   = "f1f26d22dab5c4eabe6d01b63c906889e7e817d3"
 	supertonicBaseURL  = "https://huggingface.co/Supertone/supertonic-3/resolve/" + SupertonicRevision + "/"
+	nemotronBaseURL    = "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/" + NemotronRevision + "/"
 	ortBaseURL         = "https://github.com/microsoft/onnxruntime/releases/download/v" + ORTVersion + "/"
 )
 
@@ -65,6 +70,16 @@ func Layout(root string) (libDir, onnxDir, voiceDir string) {
 		filepath.Join(root, "supertonic", "onnx"),
 		filepath.Join(root, "supertonic", "voice_styles")
 }
+
+// ASRDir is the Nemotron model directory under root (encoder.onnx + .data,
+// decoder_joint.onnx, tokenizer.model).
+func ASRDir(root string) string { return filepath.Join(root, "nemotron") }
+
+// ASREncoderPath is the installed encoder.onnx path. The ASR engine loads the
+// encoder by PATH (not bytes) because ORT resolves its external weights file
+// (encoder.onnx.data) relative to the model on disk; pass this after verifying
+// the full manifest so the loaded graph is the checksum-verified one.
+func ASREncoderPath(root string) string { return filepath.Join(ASRDir(root), "encoder.onnx") }
 
 // ortAssets is the ORT shared library per platform. Microsoft dropped CPU builds
 // for some targets, so not every Tier-1 platform has one (e.g. macOS x64 after
@@ -155,16 +170,44 @@ func SupertonicAssets() []Asset {
 	return out
 }
 
+// nemoModels are the pinned Nemotron 3.5 streaming int8 files (sha256 = HF
+// lfs.oid for the LFS objects). The encoder carries its weights in an external
+// encoder.onnx.data file; both the graph and the data file are pinned + verified
+// so the by-path encoder load consumes only checksum-verified bytes. config.json
+// is intentionally omitted — the language prompt dictionary and all model dims
+// are embedded in internal/asr, so no sidecar config is read at run time.
+var nemoModels = []supModel{
+	{"encoder.onnx", filepath.Join("nemotron", "encoder.onnx"), 42963073, "a6fd0bbedae97047cb444dba928273b66b9cae36249cf697f4bf7b6f0e167c5d"},
+	{"encoder.onnx.data", filepath.Join("nemotron", "encoder.onnx.data"), 614649600, "c2f230b026aa4f29b1b5ce099b2fba853db361773157d478d67127b877f64c42"},
+	{"decoder_joint.onnx", filepath.Join("nemotron", "decoder_joint.onnx"), 24483962, "7fe1a8c2e247b55bbb8ca917ef64cf60227909c6fe63be2da7ea6fc3858d6a69"},
+	{"tokenizer.model", filepath.Join("nemotron", "tokenizer.model"), 406554, "ce3895e40806f02a26c3a225161b96ef682d6c0054bae32a245dec4258d7d291"},
+}
+
+// NemotronAssets returns the platform-independent Nemotron ASR model assets.
+func NemotronAssets() []Asset {
+	out := make([]Asset, 0, len(nemoModels))
+	for _, m := range nemoModels {
+		out = append(out, Asset{
+			Name: "nemotron/" + m.path, URL: nemotronBaseURL + m.path,
+			SHA256: m.sha256, Size: m.size, Dest: m.dest, Archive: ArchiveNone,
+		})
+	}
+	return out
+}
+
 // Manifest is the full pinned asset set for a platform: the ORT library (when
-// available) followed by the Supertonic models. unsupported is true when no ORT
-// CPU build exists for the platform (local TTS can't run there).
+// available) followed by the Supertonic (TTS) and Nemotron (ASR) models.
+// unsupported is true when no ORT CPU build exists for the platform (neither
+// local TTS nor ASR can run there).
 func Manifest(goos, goarch string) (list []Asset, ortUnsupported bool) {
 	if a, ok := ORTAsset(goos, goarch); ok {
 		list = append(list, a)
 	} else {
 		ortUnsupported = true
 	}
-	return append(list, SupertonicAssets()...), ortUnsupported
+	list = append(list, SupertonicAssets()...)
+	list = append(list, NemotronAssets()...)
+	return list, ortUnsupported
 }
 
 // TotalBytes is the sum of artifact sizes in a manifest (for "how much to

@@ -302,6 +302,8 @@ func toOrtValue(t Tensor) (ort.Value, error) {
 		return ort.NewTensor(shape, append([]float32(nil), t.Float32...))
 	case DtypeInt64:
 		return ort.NewTensor(shape, append([]int64(nil), t.Int64...))
+	case DtypeInt32:
+		return ort.NewTensor(shape, append([]int32(nil), t.Int32...))
 	default:
 		return nil, ErrUnavailable
 	}
@@ -316,6 +318,8 @@ func fromOrtValue(v ort.Value) (Tensor, error) {
 		return NewFloat32(shape, append([]float32(nil), tv.GetData()...)), nil
 	case *ort.Tensor[int64]:
 		return NewInt64(shape, append([]int64(nil), tv.GetData()...)), nil
+	case *ort.Tensor[int32]:
+		return NewInt32(shape, append([]int32(nil), tv.GetData()...)), nil
 	default:
 		return Tensor{}, fmt.Errorf("onnx: unsupported output tensor type %T", v)
 	}
