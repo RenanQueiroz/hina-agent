@@ -22,6 +22,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/platform"
 	"github.com/RenanQueiroz/hina-agent/internal/rtc"
 	"github.com/RenanQueiroz/hina-agent/internal/tts"
+	"github.com/RenanQueiroz/hina-agent/internal/vad"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -105,18 +106,38 @@ func cmdServer(args []string) error {
 		defer asrEngine.Close()
 	}
 
+	// Local VAD engine (Phase 6). Off unless [voice] enabled; reports itself
+	// unavailable in the default CGo-free build or without the installed Silero
+	// model. Drives the live conversation loop's turn detection.
+	vadEngine := buildVAD(a, bus)
+	if vadEngine != nil {
+		defer vadEngine.Close()
+	}
+
+	// The HTTP server is built before the WebRTC manager because it implements the
+	// rtc.AgentService (the live-voice loop's turn-runner), which the manager needs.
+	srv := httpapi.New(a.cfg, a.store, bus, am, provider, a.logs, a.log)
+
 	// WebRTC voice bridge (Phase 3). The bus is its SSE event sink so live
-	// audio/lifecycle events are observable on the conversation stream.
-	rtcMgr, err := rtc.NewManager(rtc.Config{ICEServers: iceServers(a.cfg.Realtime.ICEServers), TTS: ttsEngine, ASR: asrEngine, Log: a.log}, bus)
+	// audio/lifecycle events are observable on the conversation stream. VAD + the
+	// server's agent turn-runner power the Phase 6 live conversation loop.
+	rtcCfg := rtc.Config{ICEServers: iceServers(a.cfg.Realtime.ICEServers), TTS: ttsEngine, ASR: asrEngine, Log: a.log}
+	if a.cfg.Voice.Enabled && vadEngine != nil {
+		rtcCfg.VAD = vadEngine
+		rtcCfg.Agent = srv
+	}
+	rtcMgr, err := rtc.NewManager(rtcCfg, bus)
 	if err != nil {
 		return err
 	}
 	defer rtcMgr.Close()
 
-	srv := httpapi.New(a.cfg, a.store, bus, am, provider, a.logs, a.log)
 	srv.SetRealtime(rtcMgr)
 	srv.SetTTS(ttsEngine)
 	srv.SetASR(asrEngine)
+	if vadEngine != nil {
+		srv.SetVAD(vadEngine)
+	}
 	srv.SetReady(true)
 
 	httpSrv := &http.Server{
@@ -276,6 +297,71 @@ func buildASR(a *app, sink asr.EventSink) asr.Engine {
 	st := engine.Status()
 	a.log.Info("asr engine", "available", st.Available, "reason", st.Reason, "biasing", st.Biasing, "ort", st.Runtime.Version)
 	return engine
+}
+
+// buildVAD constructs the local Silero VAD engine when [voice] is enabled, wiring
+// the shared ONNX runtime and the installed Silero model. It mirrors buildASR: nil
+// when disabled; an unavailable engine (default CGo-free build, or uninstalled/
+// unverified model) when it can't run, so the live loop is rejected at runtime. The
+// small self-contained model loads from verified bytes (no external data).
+func buildVAD(a *app, sink vad.EventSink) *vad.Engine {
+	if !a.cfg.Voice.Enabled {
+		return nil
+	}
+	if assets.WindowsLocalVoiceGated && runtime.GOOS == "windows" {
+		a.log.Warn("voice: local voice is gated to Phase 11 on Windows; leaving the live loop disabled")
+		return nil
+	}
+	root := assetsRoot(a.cfg, a.paths)
+	if !secureAssetRoot(root, a.log) {
+		return nil
+	}
+	if ok, reason := assets.ORTVerified(root, runtime.GOOS, runtime.GOARCH); !ok {
+		a.log.Warn("voice: ONNX Runtime not verified; live voice disabled (run: hina assets pull)", "reason", reason)
+		return nil
+	}
+	if ok, reason := assets.VADVerified(root); !ok {
+		a.log.Warn("voice: Silero VAD model failed verification; live voice disabled (run: hina assets pull)", "reason", reason)
+		return nil
+	}
+	libFile := assets.ORTLibPath(root, runtime.GOOS, runtime.GOARCH)
+	backend, err := onnx.New(onnx.Config{LibFile: libFile, IntraOpThreads: a.cfg.ASR.Threads})
+	if err != nil {
+		a.log.Warn("voice: onnx backend init failed", "err", err)
+	}
+	engine := vad.NewEngine(vad.Config{
+		Backend: backend,
+		ReadModel: func() ([]byte, error) {
+			return assets.ReadVerified(root, filepath.Join("vad", "silero_vad.onnx"))
+		},
+		IdleTTL: a.cfg.Voice.IdleTTLOr(5 * time.Minute),
+		Params:  voiceVADParams(a.cfg.Voice),
+		Sink:    sink,
+		Log:     a.log,
+	})
+	st := engine.Status()
+	a.log.Info("vad engine", "available", st.Available, "reason", st.Reason, "ort", st.Runtime.Version)
+	return engine
+}
+
+// voiceVADParams maps the [voice] config to the VAD engine's default tunables (0
+// fields fall back to the engine defaults; the client's per-session turn_detection
+// overrides these).
+func voiceVADParams(c config.VoiceConfig) vad.Params {
+	p := vad.Params{Threshold: c.Threshold}
+	if c.SilenceMs > 0 {
+		p.MinSilence = time.Duration(c.SilenceMs) * time.Millisecond
+	}
+	if c.PreSpeechMs > 0 {
+		p.PreSpeech = time.Duration(c.PreSpeechMs) * time.Millisecond
+	}
+	if c.MinSpeechMs > 0 {
+		p.MinSpeech = time.Duration(c.MinSpeechMs) * time.Millisecond
+	}
+	if c.MaxDurationS > 0 {
+		p.MaxDuration = time.Duration(c.MaxDurationS) * time.Second
+	}
+	return p
 }
 
 // secureAssetRoot makes the local-inference asset root owner-private (0700 on

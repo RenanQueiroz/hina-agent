@@ -12,6 +12,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/audio"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/tts"
+	"github.com/RenanQueiroz/hina-agent/internal/voice"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -26,8 +27,10 @@ type Session struct {
 	pc             *webrtc.PeerConnection
 	log            *slog.Logger
 	sink           EventSink
-	tts            tts.Engine // optional local speech engine (nil/unavailable -> SpeakText rejected)
-	asr            asr.Engine // optional local recognition engine (nil/unavailable -> ListenStarted rejected)
+	tts            tts.Engine   // optional local speech engine (nil/unavailable -> SpeakText rejected)
+	asr            asr.Engine   // optional local recognition engine (nil/unavailable -> ListenStarted rejected)
+	vad            VADEngine    // optional local VAD engine (nil/unavailable -> live mode rejected)
+	agent          AgentService // optional agent turn-runner for live replies (nil -> live replies rejected)
 
 	start  time.Time // monotonic reference for send timestamps / cursors
 	ctx    context.Context
@@ -65,6 +68,22 @@ type Session struct {
 	activeSeg   uint64      // id of the installed segment, tagged on every ASR event for that segment
 	listenTimer *time.Timer // per-segment max-duration timer; auto-finalizes a never-stopped segment
 	asrDropped  int64       // mic frames dropped this segment under recognizer backpressure (transcript is incomplete)
+
+	// Live conversation mode (Phase 6): a continuous VAD->ASR->agent->TTS loop. All
+	// fields are guarded by liveMu; pipeline access is single-threaded through it.
+	liveMu       sync.Mutex         // guards the live fields + serializes voice.Pipeline access
+	live         bool               // live conversation loop active
+	liveStarting bool               // an async live setup (cold-load) is in flight
+	liveReady    bool               // engines warm + pipeline installed; mic audio is routed to it
+	liveGen      uint64             // bumped on exit/close to invalidate in-flight setup + replies
+	livePipeline *livePipeline      // the VAD/turn-detection pipeline + the keep-warm ASR pin (nil until ready)
+	turnRecog    asr.Stream         // the ACTIVE turn's fresh recognizer (nil between turns); one stream per logical turn
+	workerRecog  asr.Stream         // the recognizer the serial reply worker is finalizing now (nil otherwise); stopLive closes it to abort a stale finalize across the worker's ownership-check gap
+	turnSeq      uint64             // current logical-turn id: bumped on each Open, tags partials so a stale one can't corrupt the next turn
+	replyCancel  context.CancelFunc // cancels the in-flight live agent turn + its spoken reply
+	replyCtx     context.Context    // the in-flight reply's context (for the reply goroutine)
+	replyGen     uint64             // arrival generation of the in-flight reply (barge-in/superseded invalidation)
+	replyTurnID  string             // durable id of the committed assistant turn currently being spoken (for barge-in truncation)
 }
 
 // maxControlBytes bounds a single events-channel control message. Control frames
@@ -87,7 +106,7 @@ func (s *Session) channelsOpen() bool {
 		a.ReadyState() == webrtc.DataChannelStateOpen
 }
 
-func newSession(sid, userID, conversationID string, pc *webrtc.PeerConnection, log *slog.Logger, sink EventSink, engine tts.Engine, recog asr.Engine) *Session {
+func newSession(sid, userID, conversationID string, pc *webrtc.PeerConnection, log *slog.Logger, sink EventSink, engine tts.Engine, recog asr.Engine, voiceVAD VADEngine, agentSvc AgentService) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
 		id:             sid,
@@ -98,6 +117,8 @@ func newSession(sid, userID, conversationID string, pc *webrtc.PeerConnection, l
 		sink:           sink,
 		tts:            engine,
 		asr:            recog,
+		vad:            voiceVAD,
+		agent:          agentSvc,
 		start:          time.Now(),
 		ctx:            ctx,
 		cancel:         cancel,
@@ -277,6 +298,19 @@ func (s *Session) handleControlMessage(msg webrtc.DataChannelMessage) {
 	if err := json.Unmarshal(msg.Data, &e); err != nil {
 		return
 	}
+	// While the live conversation loop is active it OWNS playback + recognition: the
+	// assistant's voice is the agent reply and barge-in is server-driven (VAD). Ignore
+	// every manual playback/listen/interrupt control so it can't stop or replace a live
+	// reply — or run recognition — outside the live-aware truncation path (which would
+	// leave the durable assistant turn looking un-interrupted). SessionUpdate (to exit/
+	// reconfigure live mode) and PlaybackProgress (the cursor barge-in needs) still pass.
+	if s.liveActive() {
+		switch e.Type {
+		case events.TypeModeChanged, events.TypeSpeakText, events.TypeListenStarted,
+			events.TypeListenStopped, events.TypeUserInterrupted:
+			return
+		}
+	}
 	switch e.Type {
 	case events.TypeModeChanged:
 		var p struct {
@@ -312,6 +346,20 @@ func (s *Session) handleControlMessage(msg webrtc.DataChannelMessage) {
 		}
 	case events.TypeListenStopped:
 		s.stopListen()
+	case events.TypeSessionUpdate:
+		// Live-voice control: a turn_detection object turns the live loop on (or
+		// changes its config); a null/absent turn_detection turns it off.
+		var p struct {
+			TurnDetection *voice.TurnDetection `json:"turn_detection"`
+		}
+		if json.Unmarshal(e.Payload, &p) != nil {
+			return
+		}
+		if p.TurnDetection == nil {
+			s.stopLive()
+			return
+		}
+		s.startLive(*p.TurnDetection)
 	case events.TypeUserInterrupted:
 		var p struct {
 			Epoch         uint32 `json:"epoch"`
@@ -424,16 +472,24 @@ func (s *Session) Close() {
 	s.closed.Store(true)
 	s.commitMu.Unlock()
 	s.closeOnce.Do(func() {
-		// Cancel the session context FIRST: it propagates to every ASR stream
-		// (their lifetimes derive from it), so any in-flight recognizer work
-		// unblocks before closeListen waits on asrMu — teardown can never wedge
-		// behind a busy ASR stream.
+		// stopLive FIRST, before any context cancellation. stopLive captures the in-flight
+		// committed live reply's turn id, reserves the interrupt fence, and durably marks it
+		// interrupted — all UNDER liveMu, then does its OWN reply cancellation. If we cancelled
+		// s.ctx / the speak ctx first, runLiveReply could unblock, treat the reply as cancelled,
+		// and endReply-clear replyTurnID before stopLive captured it — losing the durable
+		// interruption mark for a disconnect mid-reply.
+		s.stopLive() // tear down the live pipeline + recognizer (releases the bundles); marks the reply
+		// Now cancel the session context: it propagates to every (manual) ASR stream
+		// (their lifetimes derive from it), so any in-flight recognizer work unblocks
+		// before closeListen waits on asrMu — teardown can never wedge behind a busy stream.
 		s.cancel()
 		s.cancelSpeak() // invalidate any pending speak so it can't start after teardown
-		s.closeListen() // tear down any active ASR stream (releases the model bundle)
+		s.closeListen() // tear down any active manual ASR stream (releases the model bundle)
 		s.out.stop()
-		if err := s.pc.Close(); err != nil {
-			s.log.Debug("rtc: close peer connection", "err", err)
+		if s.pc != nil {
+			if err := s.pc.Close(); err != nil {
+				s.log.Debug("rtc: close peer connection", "err", err)
+			}
 		}
 		if s.onClose != nil {
 			s.onClose()

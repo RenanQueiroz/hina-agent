@@ -1,8 +1,40 @@
 # Phase 6 — Live voice pipeline: VAD, semantic VAD, barge-in, echo handling + benchmark harness
 
-Status: ready after Phases 4 + 5.
+Status: **implemented**. The live conversation loop (continuous VAD → ASR → agent → TTS with
+speak-to-interrupt barge-in) runs on Linux/macOS behind the `onnx` build tag; the turn-detection
+logic, the agent loop, and the benchmark harness are CGo-free and tested in the default build.
+Windows local voice stays gated to Phase 11.
 Depends on: Phase 3 (transport + playback cursor), Phase 4 (TTS), Phase 5 (ASR), Phase 2 (context builder).
 Unblocks: Phase 10 (shares the session/event model and barge-in logic).
+
+## What landed
+
+- **Shared agent loop** (`internal/agent`): a cancellable, event-emitting `Loop` that streams the
+  provider, classifies interrupted vs errored, and reserves the tool-call hook (Phase 7). Text chat
+  (`handlePostMessage`) and the live voice loop both run it, so the two modes can't drift.
+- **Silero VAD** (`internal/vad`): a pure-Go online turn-boundary state machine (threshold/hysteresis,
+  min-speech / min-silence / pre-roll / max-duration tunables) over the `internal/onnx` runtime; the
+  real Silero model is validated end-to-end by the onnx-tagged integration test.
+- **Turn detection** (`internal/voice`): an OpenAI-shaped `turn_detection` config (server_vad /
+  semantic_vad, threshold/prefix_padding_ms/silence_duration_ms/create_response/interrupt_response/
+  eagerness), a v1 semantic detector, a backchannel filter, and playback-aware echo suppression,
+  composed into a `Pipeline` the live loop and the benchmark both drive.
+- **Live rtc loop** (`internal/rtc/live.go`): continuous capture → VAD → ASR → agent → TTS, with
+  server-detected barge-in (cursor-truncated playback, cancelled reply, `UserInterrupted` +
+  `ConversationTruncated`), durable voice-turn persistence via `rtc.AgentService` (so spoken turns
+  render in the shared timeline and a text↔live switch preserves context with no audio rehydration).
+- **Benchmark harness** (`internal/bench`, `hina bench`): replays labeled fixtures through the real
+  pipeline and emits percentile metrics; non-interactive on every Tier-1 host (synthetic VAD by
+  default, real Silero under the onnx build).
+
+## Decision — `openai-agents-go` adoption (research-findings C6/B9)
+
+**Keep the minimal custom loop; do not adopt `nlpodyssey/openai-agents-go` in Phase 6.** Rationale: the
+custom `agent.Loop` is ~100 lines, fully tested, and cleanly covers streaming, `context` cancellation,
+the typed-event envelope, and the tool-routing seam that text and voice share. The SDK is YELLOW
+(only `v0.1.0` tagged, `main` quiet after 2026-03, two maintainers), and adopting it would mean
+threading Hina's event/session model through its abstractions for no current gain. Re-evaluate it for
+the tool/MCP/session machinery in Phase 7+ — and pin a commit SHA if adopted then.
 
 ## Goal
 
@@ -44,14 +76,25 @@ The pipeline logic is cross-platform; it depends on the Phase 4/5 `onnx` runtime
 9. **Text↔live transitions** in the UI over one session.
 
 ## Testable exit criteria
-- [ ] A user holds a multi-turn spoken conversation with Hina (Linux/macOS); transcript + assistant turns render in the shared timeline.
-- [ ] **Speak-to-interrupt works**: talking over the assistant stops playback within the target budget, truncates assistant state to the played boundary, and the new utterance is captured with pre-roll.
-- [ ] Backchannels ("yeah", "uh-huh") during assistant speech do **not** usually interrupt; a real new request does.
-- [ ] Assistant TTS output is **not** usually mistaken for user speech (echo fixture passes target false-VAD-start rate).
-- [ ] Semantic VAD delays commit on "umm…/trailing" without making complete requests feel sluggish (fixture metrics within target).
-- [ ] Text→live→text within one session preserves context (no audio rehydration).
-- [ ] The benchmark harness runs non-interactively and emits percentile metrics for every fixture on Linux/macOS (and no-model/cloud fixtures on Windows CI).
-- [ ] Decision recorded: adopt `openai-agents-go` (pinned SHA) or keep the custom loop, with rationale.
+- [x] A user holds a multi-turn spoken conversation with Hina (Linux/macOS); transcript + assistant turns render in the shared timeline. *(live rtc loop + `AgentService` durable voice turns; `TestLiveTurnCommitsAndReplies`.)*
+- [x] **Speak-to-interrupt works**: talking over the assistant stops playback within the target budget, truncates assistant state to the played boundary, and the new utterance is captured with pre-roll. *(server-VAD barge-in: `out.interruptPlayback` + cancel reply + `ConversationTruncated`; `TestLiveBargeInTruncatesAndCancelsReply`, bench `interruption_playback`.)*
+- [x] Backchannels ("yeah", "uh-huh") during assistant speech do **not** usually interrupt; a real new request does. *(backchannel filter; bench `backchannel_playback` = 1/1 suppressed, `interruption_playback` = 1 barge-in.)*
+- [x] Assistant TTS output is **not** usually mistaken for user speech (echo fixture passes target false-VAD-start rate). *(playback-aware echo suppression; bench `echo_playback` = 0 false starts.)*
+- [x] Semantic VAD delays commit on "umm…/trailing" without making complete requests feel sluggish (fixture metrics within target). *(semantic v1 + eagerness; bench `semantic_incomplete` commits once on the completed continuation, not the pause.)*
+- [x] Text→live→text within one session preserves context (no audio rehydration). *(both modes build context from canonical turns via `agent.BuildContext`; voice turns persist with `mode="voice"`.)*
+- [x] The benchmark harness runs non-interactively and emits percentile metrics for every fixture on Linux/macOS (and no-model/cloud fixtures on Windows CI). *(`hina bench` / `internal/bench`; synthetic VAD runs everywhere, `--real` swaps Silero.)*
+- [x] Decision recorded: adopt `openai-agents-go` (pinned SHA) or keep the custom loop, with rationale. *(see "Decision" above — keep the custom loop.)*
+
+## Known v1 limitations (carried forward)
+- **Reply TTS is spoken once the full reply is generated** (not streamed sentence-by-sentence). Supertonic
+  outruns realtime and replies are short, so first-audio latency is acceptable for v1; sentence-streamed
+  TTS is a latency optimization for later.
+- **Barge-in truncation is turn-level, not word-level.** A barge-in cancels the reply, truncates playback
+  at the played cursor, and durably marks the assistant turn interrupted (with `played_ms`) so the next
+  model context reflects that the user heard only a prefix — but the turn keeps its full generated text;
+  mapping the played-audio boundary to the exact word needs TTS word timestamps (future).
+- **The benchmark's default VAD is synthetic** (energy-based) so it runs on every host; real noise/echo
+  discrimination numbers come from the `--real` Silero path under the onnx build.
 
 ## Risks & mitigations
 - **Echo cancellation is hard even with AEC** → layered approach + playback-aware suppression + user override; measure, don't assume.

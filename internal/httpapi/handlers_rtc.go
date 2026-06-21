@@ -111,6 +111,8 @@ func (s *Server) handleRealtimeSpeak(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "speaking"})
 	case errors.Is(err, rtc.ErrNoSession):
 		writeErr(w, http.StatusConflict, "no active live session; start one first")
+	case errors.Is(err, rtc.ErrLiveActive):
+		writeErr(w, http.StatusConflict, "a live conversation is active; the assistant's voice is the agent reply")
 	case errors.Is(err, tts.ErrUnavailable):
 		writeErr(w, http.StatusServiceUnavailable, "local TTS is unavailable")
 	default:
@@ -144,6 +146,7 @@ func rtcStatsView(st rtc.SessionStats) wire.RTCSessionStats {
 		BytesOut:        st.BytesOut,
 		FramesDropped:   st.FramesDropped,
 		Interrupts:      st.Interrupts,
+		DroppedTurns:    st.DroppedTurns,
 		PlayedMs:        st.PlayedMs,
 		CaptureMs:       st.CaptureMs,
 		AppRTTMicros:    st.AppRTTMicros,

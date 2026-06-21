@@ -205,6 +205,22 @@ func ASRVerified(root string) (ok bool, reason string) {
 	return true, ""
 }
 
+// VADVerified reports whether the pinned Silero VAD model is installed and matches
+// its checksum on disk — the per-engine gate so a VAD-using build isn't blocked by
+// missing TTS/ASR assets (and vice-versa). ok=false carries a human reason.
+func VADVerified(root string) (ok bool, reason string) {
+	for _, m := range vadModels {
+		st := verifyAsset(root, Asset{Name: "vad/silero_vad.onnx", SHA256: m.sha256, Size: m.size, Dest: m.dest})
+		if !st.Verified {
+			if st.Reason != "" {
+				return false, "vad/silero_vad.onnx: " + st.Reason
+			}
+			return false, "vad/silero_vad.onnx: not installed"
+		}
+	}
+	return true, ""
+}
+
 // VerifyVoice re-checks a single preset voice file's checksum on disk (cheap —
 // ~290 KB). Used to re-verify an on-demand voice load against the pinned digest,
 // closing the gap between startup verification and a later (warm-bundle) load.
@@ -232,7 +248,7 @@ func VerifyVoice(root, id string) error {
 // caller loads exactly the verified content — closing the verify-then-reopen TOCTOU
 // where a concurrent writer could swap the file between the hash and the load.
 func ReadVerified(root, destRel string) ([]byte, error) {
-	for _, m := range append(append([]supModel{}, supModels...), nemoModels...) {
+	for _, m := range append(append(append([]supModel{}, supModels...), nemoModels...), vadModels...) {
 		if m.dest != destRel {
 			continue
 		}

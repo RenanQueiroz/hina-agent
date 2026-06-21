@@ -3,6 +3,7 @@ package rtc
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/RenanQueiroz/hina-agent/internal/asr"
@@ -151,9 +152,16 @@ func (s *Session) stopListen() {
 // is force-aborted. Finalizing flushes only the trailing audio, so it normally
 // completes in well under a second; the bound guards against a stalled/hung
 // recognizer orphaning the stream (and its model-bundle ref) on a normal stop,
-// when the session context is still live and nothing else would cancel it. A var
-// so tests can shorten it.
-var finalizeTimeout = 10 * time.Second
+// when the session context is still live and nothing else would cancel it.
+//
+// Stored as an atomic so a test can shorten it WITHOUT racing the background finalize
+// goroutines (listen.finalizeSegment + live.finalizeWithTimeout) that read it — a plain
+// var let a leaked finalize goroutine read it while the next test wrote it.
+var finalizeTimeoutNs atomic.Int64
+
+func init() { finalizeTimeoutNs.Store(int64(10 * time.Second)) }
+
+func finalizeTimeout() time.Duration { return time.Duration(finalizeTimeoutNs.Load()) }
 
 // finalizeSegment finalizes a captured segment stream off-goroutine and publishes
 // its terminal event (ASRFinal on success, ErrorEvent + ListenStopped on a decode
@@ -175,7 +183,7 @@ func (s *Session) finalizeSegment(stream asr.Stream, seg uint64, dropped int64, 
 	select {
 	case r = <-ch:
 		_ = stream.Close()
-	case <-time.After(finalizeTimeout):
+	case <-time.After(finalizeTimeout()):
 		// The recognizer stalled. Emit the terminal and return WITHOUT waiting on the
 		// stream's shutdown — terminal delivery must not depend on a cooperative
 		// Close/Finalize. Close is triggered in the background (for the concrete
@@ -184,7 +192,7 @@ func (s *Session) finalizeSegment(stream asr.Stream, seg uint64, dropped int64, 
 		// it returns). A pathological non-cooperative stream can't pin this goroutine
 		// or leave the client listening.
 		go stream.Close()
-		s.log.Warn("rtc: ASR finalize timed out; segment aborted", "seconds", finalizeTimeout.Seconds())
+		s.log.Warn("rtc: ASR finalize timed out; segment aborted", "seconds", finalizeTimeout().Seconds())
 		if !s.isClosed() {
 			s.emit(events.TypeError, map[string]string{"error": "recognition timed out"})
 			s.emit(events.TypeListenStopped, map[string]any{"reason": "timeout", "seg": seg})

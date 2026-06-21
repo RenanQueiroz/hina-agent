@@ -49,6 +49,7 @@ export function AdminPage() {
 
       <RuntimePanel />
       <ASRRuntimePanel />
+      <VADRuntimePanel />
 
       <Card className="p-4">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">Users</h2>
@@ -197,6 +198,66 @@ function ASRRuntimePanel() {
   );
 }
 
+// VADRuntimePanel shows the local Silero VAD engine that powers the Phase 6 live
+// conversation loop: ONNX Runtime, load state, and probe/cold-load metrics.
+function VADRuntimePanel() {
+  const rt = useQuery({
+    queryKey: ["admin", "runtime"],
+    queryFn: api.adminRuntime,
+    refetchInterval: 5000,
+  });
+  const vad = rt.data?.vad;
+  const ort = vad?.runtime;
+  const status = !vad?.enabled
+    ? "disabled"
+    : vad?.available
+      ? vad.loaded
+        ? "loaded (warm)"
+        : "ready (idle)"
+      : "unavailable";
+  return (
+    <Card className="p-4">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">
+        Live voice / VAD runtime
+      </h2>
+      {rt.isLoading ? (
+        <Spinner />
+      ) : (
+        <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-sm">
+          <dt className="text-zinc-500">Status</dt>
+          <dd>{status}</dd>
+          <dt className="text-zinc-500">ONNX Runtime</dt>
+          <dd>
+            {ort?.available ? (
+              `${ort.version} (${ort.provider})`
+            ) : (
+              <span className="text-zinc-400">{ort?.reason || "not linked"}</span>
+            )}
+          </dd>
+          <dt className="text-zinc-500">Cold load</dt>
+          <dd>{vad?.cold_load_ms ? `${vad.cold_load_ms} ms` : "—"}</dd>
+          <dt className="text-zinc-500">Probes / errors</dt>
+          <dd>
+            {vad?.probe_count ?? 0} / {vad?.error_count ?? 0}
+          </dd>
+          {vad?.reason && !vad.available && (
+            <>
+              <dt className="text-zinc-500">Reason</dt>
+              <dd className="text-amber-600 dark:text-amber-400">{vad.reason}</dd>
+            </>
+          )}
+          {vad?.last_error && (
+            <>
+              <dt className="text-zinc-500">Last error</dt>
+              <dd className="text-red-500">{vad.last_error}</dd>
+            </>
+          )}
+        </dl>
+      )}
+    </Card>
+  );
+}
+
 // LiveSessionsPanel polls the WebRTC stats so an admin can watch active voice
 // sessions and their loss/jitter/RTT in near real time (Phase 3 instrumentation).
 function LiveSessionsPanel() {
@@ -218,7 +279,7 @@ function LiveSessionsPanel() {
           <table className="w-full text-left text-sm">
             <thead className="text-zinc-500">
               <tr>
-                {["Session", "Mode", "Pkts in", "Loss", "Jitter", "RTT", "Played", "Drops"].map((h) => (
+                {["Session", "Mode", "Pkts in", "Loss", "Jitter", "RTT", "Played", "Drops", "Lost turns"].map((h) => (
                   <th key={h} className="py-1 pr-3 font-medium">
                     {h}
                   </th>
@@ -236,6 +297,7 @@ function LiveSessionsPanel() {
                   <td className="py-1.5 pr-3">{(s.app_rtt_micros / 1000).toFixed(1)} ms</td>
                   <td className="py-1.5 pr-3">{s.played_ms} ms</td>
                   <td className="py-1.5 pr-3">{s.frames_dropped}</td>
+                  <td className="py-1.5 pr-3">{s.dropped_turns}</td>
                 </tr>
               ))}
             </tbody>

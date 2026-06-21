@@ -83,6 +83,7 @@ type RTCSessionStats struct {
 	BytesOut      uint64 `json:"bytes_out"`
 	FramesDropped uint64 `json:"frames_dropped"`
 	Interrupts    uint64 `json:"interrupts"`
+	DroppedTurns  uint64 `json:"dropped_turns"`
 
 	PlayedMs     int64 `json:"played_ms"`
 	CaptureMs    int64 `json:"capture_ms"`
@@ -103,6 +104,21 @@ type AdminRuntime struct {
 	LLMProvider string     `json:"llm_provider"`
 	TTS         TTSRuntime `json:"tts"`
 	ASR         ASRRuntime `json:"asr"`
+	VAD         VADRuntime `json:"vad"`
+}
+
+// VADRuntime is the local Silero VAD engine + ONNX runtime status for the admin
+// view. The live conversation loop (Phase 6) needs this plus TTS + ASR available.
+type VADRuntime struct {
+	Enabled    bool       `json:"enabled"` // [voice] enabled
+	Available  bool       `json:"available"`
+	Loaded     bool       `json:"loaded"` // model currently resident (warm)
+	Reason     string     `json:"reason,omitempty"`
+	Runtime    ORTRuntime `json:"runtime"`
+	ColdLoadMs int64      `json:"cold_load_ms"`
+	ProbeCount int64      `json:"probe_count"`
+	ErrorCount int64      `json:"error_count"`
+	LastError  string     `json:"last_error,omitempty"`
 }
 
 // ASRRuntime is the local streaming ASR (Nemotron) engine + ONNX runtime status

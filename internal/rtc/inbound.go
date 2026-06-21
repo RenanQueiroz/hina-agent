@@ -90,9 +90,14 @@ func (in *inbound) processPCM48(pcm []float32) {
 	if in.rsASR != nil {
 		if asr16k, err := in.rsASR.Process(pcm); err == nil {
 			in.captureSamples += int64(len(asr16k))
-			// Route to the recognizer when a listening segment is active (Phase 5);
-			// a no-op otherwise. Turn boundaries are client-driven here, VAD in Phase 6.
-			in.s.feedASR(asr16k)
+			// Route the 16 kHz mic stream to the live VAD->ASR->agent->TTS loop when
+			// it's active (Phase 6); otherwise to the manual client-driven listen
+			// segment (Phase 5). feedLive is a no-op unless live mode is on.
+			if in.s.liveActive() {
+				in.s.feedLive(asr16k)
+			} else {
+				in.s.feedASR(asr16k)
+			}
 		} else {
 			in.s.log.Debug("rtc: ASR resample", "err", err)
 		}

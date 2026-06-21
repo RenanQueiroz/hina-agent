@@ -24,6 +24,7 @@ type Config struct {
 	Realtime RealtimeConfig `toml:"realtime"`
 	TTS      TTSConfig      `toml:"tts"`
 	ASR      ASRConfig      `toml:"asr"`
+	Voice    VoiceConfig    `toml:"voice"`
 	Paths    PathsConfig    `toml:"paths"`
 	Log      LogConfig      `toml:"log"`
 }
@@ -49,6 +50,35 @@ func (a ASRConfig) IdleTTLOr(def time.Duration) time.Duration {
 		return def
 	}
 	d, err := time.ParseDuration(a.IdleTTL)
+	if err != nil || d < 0 {
+		return def
+	}
+	return d
+}
+
+// VoiceConfig configures the live conversation loop (Phase 6): continuous VAD ->
+// ASR -> agent -> TTS with barge-in. It is off by default and needs local VAD
+// (Silero) + ASR + TTS to all be available (the onnx build + installed assets);
+// the per-session turn_detection (server_vad/semantic_vad) is sent by the client.
+// VAD shares the same asset root as [tts]/[asr]. Threshold/SilenceMs/MinSpeechMs/
+// MaxDurationS set the VAD engine's default tunables (the client's turn_detection
+// overrides per session).
+type VoiceConfig struct {
+	Enabled      bool    `toml:"enabled"`        // turn on the live conversation loop (needs VAD+ASR+TTS)
+	Threshold    float64 `toml:"threshold"`      // default Silero speech-onset probability (0 -> engine default 0.5)
+	SilenceMs    int     `toml:"silence_ms"`     // default trailing silence that ends a turn (0 -> default)
+	PreSpeechMs  int     `toml:"pre_speech_ms"`  // default pre-roll kept before onset (0 -> default)
+	MinSpeechMs  int     `toml:"min_speech_ms"`  // default minimum speech to count a turn (0 -> default)
+	MaxDurationS int     `toml:"max_duration_s"` // default per-turn max duration (0 -> default)
+	IdleTTL      string  `toml:"idle_ttl"`       // unload the VAD model after this idle (e.g. "5m")
+}
+
+// IdleTTLOr parses IdleTTL, falling back to def when empty or invalid.
+func (v VoiceConfig) IdleTTLOr(def time.Duration) time.Duration {
+	if v.IdleTTL == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v.IdleTTL)
 	if err != nil || d < 0 {
 		return def
 	}
@@ -250,6 +280,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("HINA_ASR_ASSETS_DIR"); v != "" {
 		c.ASR.AssetsDir = v
 	}
+	if v := os.Getenv("HINA_VOICE_ENABLED"); v != "" {
+		c.Voice.Enabled = v == "1" || v == "true"
+	}
 	if v := os.Getenv("HINA_REALTIME_ICE_SERVERS"); v != "" {
 		// Env is the simple STUN path: a comma-separated URL list, each its own
 		// server with no credentials. TURN (which needs credentials) is config-file
@@ -356,6 +389,17 @@ func (c Config) Validate() error {
 	if c.ASR.IdleTTL != "" {
 		if d, err := time.ParseDuration(c.ASR.IdleTTL); err != nil || d < 0 {
 			return fmt.Errorf("asr.idle_ttl %q must be a non-negative duration (e.g. \"5m\")", c.ASR.IdleTTL)
+		}
+	}
+	if c.Voice.Threshold != 0 && (c.Voice.Threshold <= 0 || c.Voice.Threshold > 1) {
+		return fmt.Errorf("voice.threshold %v out of range (0..1, or 0 for the default)", c.Voice.Threshold)
+	}
+	if c.Voice.SilenceMs < 0 || c.Voice.PreSpeechMs < 0 || c.Voice.MinSpeechMs < 0 || c.Voice.MaxDurationS < 0 {
+		return fmt.Errorf("voice timing values (silence_ms/pre_speech_ms/min_speech_ms/max_duration_s) must be >= 0")
+	}
+	if c.Voice.IdleTTL != "" {
+		if d, err := time.ParseDuration(c.Voice.IdleTTL); err != nil || d < 0 {
+			return fmt.Errorf("voice.idle_ttl %q must be a non-negative duration (e.g. \"5m\")", c.Voice.IdleTTL)
 		}
 	}
 	// TTS and ASR share one asset root (one `hina assets pull` installs both, and

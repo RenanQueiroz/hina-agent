@@ -3,10 +3,12 @@
 // receive PCM over the audio datachannel into the player worklet, and exchange
 // the typed event envelope over the control datachannel.
 import {
+  TypeAgentTextDelta,
   TypeASRFinal,
   TypeASRPartial,
   TypeAudioInputFrame,
   TypeAudioOutputFrame,
+  TypeConversationTruncated,
   TypeError as TypeErrorEvent,
   TypeListenStarted,
   TypeListenStopped,
@@ -14,7 +16,11 @@ import {
   TypePlaybackProgress,
   TypePlaybackStarted,
   TypePlaybackStopped,
+  TypeSessionUpdate,
+  TypeSessionUpdated,
   TypeSpeakText,
+  TypeSpeechStarted,
+  TypeSpeechStopped,
   TypeTTSCompleted,
   TypeUserInterrupted,
   type Event as ServerEvent,
@@ -50,6 +56,16 @@ export interface LiveState {
   transcriptTruncated?: boolean;
   /** Why the transcript was truncated: "dropped" | "capped" | "max_duration". */
   transcriptTruncationReason?: string;
+  /** Live conversation (Phase 6): true while the VAD->ASR->agent->TTS loop is on. */
+  conversing?: boolean;
+  /** The active turn_detection type while conversing ("server_vad" | "semantic_vad"). */
+  turnDetection?: string;
+  /** True while the user is currently speaking (VAD detected a turn). */
+  speaking?: boolean;
+  /** The assistant's streamed reply to the last spoken turn. */
+  agentReply?: string;
+  /** True when the last assistant reply was interrupted by a barge-in. */
+  replyInterrupted?: boolean;
 }
 
 interface ConnectOpts {
@@ -88,6 +104,10 @@ export class LiveSession {
   // an older segment — e.g. a prior segment still finalizing when the next one
   // started — are ignored so they can't clear or corrupt the active segment's UI.
   private listenSeg: number | null = null;
+  // Current LIVE conversation turn seg (set by SpeechStarted). Live ASR/speech/reply
+  // events are tagged with their turn's seg; events from an older turn (e.g. a slow
+  // finalize) are dropped so they can't clobber the current turn's UI.
+  private liveSeg: number | null = null;
   // Set by close(): a multi-await connect() checks this after each await so an
   // End/unmount during setup can't resurrect the mic or a live server session.
   private closed = false;
@@ -289,11 +309,31 @@ export class LiveSession {
         }
         break;
       case TypeASRPartial:
-        if (this.isCurrentSeg(p.seg)) {
+        if (this.state.conversing) {
+          // Live partials are tagged with their turn's seg; drop one from an older turn.
+          if (this.isCurrentLiveSeg(p.seg)) {
+            this.patch({ partial: String(p.text ?? "") });
+          }
+        } else if (this.isCurrentSeg(p.seg)) {
           this.patch({ partial: String(p.text ?? "") });
         }
         break;
       case TypeASRFinal:
+        if (this.state.conversing) {
+          // A turn committed: show it as the user transcript and start a fresh reply.
+          // Drop a late final from an OLDER live turn so it can't overwrite a newer one.
+          if (this.isCurrentLiveSeg(p.seg)) {
+            this.patch({
+              speaking: false,
+              partial: "",
+              transcript: String(p.text ?? ""),
+              wakeDetected: Boolean(p.wake_detected),
+              agentReply: "",
+              replyInterrupted: false,
+            });
+          }
+          break;
+        }
         // Segment committed: the server has finalized + reset; show the transcript.
         // Drop a stale final from a previously-stopped segment (it would otherwise
         // clear the listening UI of the segment that already started after it).
@@ -308,6 +348,52 @@ export class LiveSession {
           });
         }
         break;
+      case TypeSessionUpdated:
+        // Live-mode ack: enable/disable the conversation UI + record the active mode. A
+        // fresh live session always starts with no active speech, so clear speaking/
+        // partial here too — defense-in-depth against a stale SpeechStarted that raced a
+        // restart leaving a phantom active-turn indicator.
+        if (Boolean(p.live)) {
+          const td = (p.turn_detection ?? {}) as { type?: string };
+          this.liveSeg = null; // a fresh live session: no active turn yet
+          this.patch({
+            conversing: true,
+            turnDetection: td.type,
+            speaking: false,
+            partial: "",
+            agentReply: "",
+            transcript: undefined,
+          });
+        } else {
+          this.liveSeg = null;
+          this.patch({ conversing: false, speaking: false, partial: "" });
+        }
+        break;
+      case TypeSpeechStarted: {
+        // A new live turn: adopt its seg (events arrive in seg order, so only advance)
+        // and reset the per-turn UI.
+        const seg = Number(p.seg ?? 0);
+        if (this.liveSeg === null || seg >= this.liveSeg) {
+          this.liveSeg = seg;
+          this.patch({ speaking: true, partial: "" });
+        }
+        break;
+      }
+      case TypeSpeechStopped:
+        if (this.isCurrentLiveSeg(p.seg)) {
+          this.patch({ speaking: false });
+        }
+        break;
+      case TypeAgentTextDelta:
+        // Stream the assistant's reply, dropping deltas from a superseded turn's reply.
+        if (this.isCurrentLiveSeg(p.seg)) {
+          this.patch({ agentReply: (this.state.agentReply ?? "") + String(p.delta ?? "") });
+        }
+        break;
+      case TypeConversationTruncated:
+        // A barge-in truncated the assistant's reply at the played boundary.
+        this.patch({ replyInterrupted: true });
+        break;
       case TypeAudioInputFrame:
         this.patch({ captureMs: Number(p.capture_ms ?? 0) });
         break;
@@ -315,6 +401,13 @@ export class LiveSession {
         this.patch({ framesOut: Number(p.frame_seq ?? 0) });
         break;
       case TypeErrorEvent:
+        // A live error tagged with a turn seg (recognition timeout/failure, agent turn
+        // failure) is dropped if it's from an OLDER live turn — it must not surface a
+        // stale error on a newer turn's UI. Untagged errors (e.g. live-start failures,
+        // non-live errors) always apply.
+        if (this.state.conversing && p.seg !== undefined && !this.isCurrentLiveSeg(p.seg)) {
+          break;
+        }
         this.patch({ error: String(p.error ?? "error") });
         break;
     }
@@ -354,6 +447,14 @@ export class LiveSession {
   // dropped so a late finalize can't clobber the current one.
   private isCurrentSeg(seg: unknown): boolean {
     return this.listenSeg !== null && Number(seg ?? -1) === this.listenSeg;
+  }
+
+  // isCurrentLiveSeg reports whether a live conversation event's turn seg matches the
+  // current live turn (set by SpeechStarted). Events from an older turn — e.g. a slow
+  // finalize emitting ASRFinal/SpeechStopped after the next turn started — are dropped
+  // so they can't clobber the current turn's UI.
+  private isCurrentLiveSeg(seg: unknown): boolean {
+    return this.liveSeg !== null && Number(seg ?? -1) === this.liveSeg;
   }
 
   // sendControl emits a full Phase 1 event envelope (not just type/payload) over
@@ -397,6 +498,25 @@ export class LiveSession {
   /** Commit the active listening segment; the server replies with ASRFinal. */
   stopListen() {
     this.sendControl(TypeListenStopped, {});
+  }
+
+  /**
+   * Start the live conversation loop (Phase 6): the server runs continuous VAD ->
+   * ASR -> agent -> TTS, so the user just talks and Hina replies, with
+   * speak-to-interrupt barge-in. turnDetection picks the strategy ("server_vad" or
+   * "semantic_vad"); the server acks with SessionUpdated. Needs local VAD+ASR+TTS.
+   */
+  startConversation(turnDetection: "server_vad" | "semantic_vad" = "server_vad") {
+    const td =
+      turnDetection === "semantic_vad"
+        ? { type: "semantic_vad", eagerness: "auto" }
+        : { type: "server_vad" };
+    this.sendControl(TypeSessionUpdate, { turn_detection: td });
+  }
+
+  /** Stop the live conversation loop (a null turn_detection exits live mode). */
+  stopConversation() {
+    this.sendControl(TypeSessionUpdate, { turn_detection: null });
   }
 
   /**
@@ -451,7 +571,9 @@ export class LiveSession {
     // page would stay stuck on "Stop & transcribe" with no session, and a reconnect
     // couldn't start a new segment. Cleared regardless of error/closed status.
     this.listenSeg = null;
-    const reset: Partial<LiveState> = { listening: false, partial: "" };
+    this.liveSeg = null;
+    // Clear live-conversation state too: a closed call leaves no active loop.
+    const reset: Partial<LiveState> = { listening: false, partial: "", conversing: false, speaking: false };
     if (this.state.status !== "error") {
       reset.status = "closed";
       reset.mode = "idle";

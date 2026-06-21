@@ -74,7 +74,7 @@ func cmdAssets(args []string) error {
 
 func printAssetStatus(st assets.Status) {
 	fmt.Printf("Local-inference assets (root: %s)\n", st.Root)
-	fmt.Printf("  ONNX Runtime %s / Supertonic %s / Nemotron %s\n\n", assets.ORTVersion, assets.SupertonicRevision[:12], assets.NemotronRevision[:12])
+	fmt.Printf("  ONNX Runtime %s / Supertonic %s / Nemotron %s / Silero %s\n\n", assets.ORTVersion, assets.SupertonicRevision[:12], assets.NemotronRevision[:12], assets.SileroRevision[:12])
 	if st.ORTUnsupported {
 		fmt.Println("  [unsupported] no ONNX Runtime CPU build for this platform — local TTS unavailable here")
 	}
@@ -263,6 +263,20 @@ language = "auto"     # default language tag ("en", "es", ..., or "auto" to dete
 # context_score = 1.0 # name-biasing boost for a phrase's first token (tune on fixtures)
 # depth_scaling = 2.0 # name-biasing multiplier for deeper tokens
 # assets_dir = ""     # override the asset root (default: shared with [tts])
+
+[voice]
+# Live conversation loop (Phase 6): continuous VAD -> ASR -> agent -> TTS with
+# speak-to-interrupt barge-in. Off by default; needs local VAD (Silero) + [asr] +
+# [tts] all available (onnx-tagged build + "hina assets pull"). The per-session
+# turn_detection (server_vad/semantic_vad) is chosen by the client; these set the
+# VAD engine's default tunables.
+enabled = false
+# threshold = 0.5       # Silero speech-onset probability (0..1)
+# silence_ms = 700      # trailing silence that ends a turn (server_vad)
+# pre_speech_ms = 300   # pre-roll kept before speech onset (prefix padding)
+# min_speech_ms = 250   # discard speech shorter than this (false-start rejection)
+# max_duration_s = 30   # force-commit a turn after this long
+# idle_ttl = "5m"       # unload the VAD model after this idle period
 
 # [paths]  # optional overrides of the OS-resolved app directories
 # data_dir = "/var/lib/hina"

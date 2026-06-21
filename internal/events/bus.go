@@ -136,6 +136,49 @@ func (b *Bus) PublishTurn(ctx context.Context, t store.Turn, evs ...Event) ([]Ev
 	return evs, nil
 }
 
+// PublishTurnMetadata updates an existing turn's metadata AND appends its durable
+// event(s) atomically (one store transaction), then fans the events out. Like
+// PublishTurn it keeps the metadata change and the event that announces it from
+// ever diverging, and returns store.ErrNotFound (without publishing anything) if the
+// turn doesn't exist. Seq assignment is serialized by the bus mutex. Returns the
+// events with Seq/ServerTS populated.
+func (b *Bus) PublishTurnMetadata(ctx context.Context, turnID, metadata string, evs ...Event) ([]Event, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	ses := make([]*store.Event, len(evs))
+	for i := range evs {
+		if evs[i].EventID == "" {
+			evs[i].EventID = id.New("evt")
+		}
+		payload := string(evs[i].Payload)
+		if payload == "" {
+			payload = "{}"
+		}
+		ses[i] = &store.Event{
+			EventID:        evs[i].EventID,
+			ConversationID: evs[i].ConversationID,
+			UserID:         evs[i].UserID,
+			TurnID:         evs[i].TurnID,
+			Source:         evs[i].Source,
+			Type:           evs[i].Type,
+			Payload:        payload,
+		}
+	}
+	if err := b.store.UpdateTurnMetadataWithEvents(ctx, turnID, metadata, ses); err != nil {
+		return nil, err
+	}
+	for i := range evs {
+		evs[i].Seq = ses[i].Seq
+		evs[i].ServerTS = ses[i].ServerTS
+		if len(evs[i].Payload) == 0 {
+			evs[i].Payload = []byte("{}")
+		}
+		b.fanoutDurable(evs[i])
+	}
+	return evs, nil
+}
+
 // PublishConversation creates a conversation and its SessionCreated event
 // atomically (one store transaction), then fans the event out. Like PublishTurn,
 // this keeps a conversation from ever existing without the event that announces

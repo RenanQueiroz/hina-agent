@@ -139,6 +139,25 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 		r.add("local asr (nemotron)", "ok", "Nemotron models installed; runtime linked")
 	}
 
+	// Live voice (Phase 6) — the continuous VAD->ASR->agent->TTS loop. Gated on the
+	// Silero VAD model AND that local ASR + TTS can run (it needs all three). Windows
+	// stays gated to Phase 11.
+	vadOK, vadReason := assets.VADVerified(root)
+	switch {
+	case ortUnsupported:
+		r.add("live voice (vad)", "unavailable", "no ONNX Runtime build for this platform (Windows local voice gated to Phase 11)")
+	case !cfg.Voice.Enabled:
+		r.add("live voice (vad)", "unavailable", "disabled: set [voice] enabled=true (also needs [tts]+[asr]), build with -tags onnx, and run 'hina assets pull'")
+	case !info.Available:
+		r.add("live voice (vad)", "unavailable", "onnx runtime not linked (build with -tags onnx)")
+	case !vadOK:
+		r.add("live voice (vad)", "unavailable", "Silero VAD model not installed (run: hina assets pull): "+vadReason)
+	case !cfg.TTS.Enabled || !cfg.ASR.Enabled:
+		r.add("live voice (vad)", "unavailable", "the live loop also needs [tts] and [asr] enabled")
+	default:
+		r.add("live voice (vad)", "ok", "Silero VAD installed; runtime linked (live loop ready)")
+	}
+
 	return r
 }
 

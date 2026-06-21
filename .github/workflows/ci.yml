@@ -140,19 +140,20 @@ jobs:
           # Validate the binding against the pinned ORT 1.26.0 library on every
           # supported runner, and the REAL local-inference pipelines on Linux via
           # the actual `hina assets pull` install path (SHA256-verified): the
-          # Supertonic TTS graphs/voices AND the Nemotron ASR encoder + RNNT decode.
+          # Supertonic TTS graphs/voices, the Nemotron ASR encoder + RNNT decode,
+          # AND the Silero VAD turn detector.
           # On platforms with no ORT 1.26.0 CPU build, the model tests skip; when a
           # runtime IS provided, TestORTLoadsAndRunsModel FAILS (not skips) if it
           # can't load — a regression can't hide behind a green skip.
           arch="$(uname -m)"
           if [ "${RUNNER_OS}-${arch}" = "Linux-x86_64" ]; then
             export HINA_TTS_ASSETS_DIR="$RUNNER_TEMP/hina-assets"
-            # Pulls both model sets (TTS ~400 MB + ASR ~680 MB) for the real tests.
+            # Pulls all model sets (TTS ~400 MB + ASR ~680 MB + Silero VAD ~2 MB).
             CGO_ENABLED=0 go run ./cmd/hina assets pull
             export ONNXRUNTIME_SHARED_LIBRARY_PATH="$(find "$HINA_TTS_ASSETS_DIR/ort" -type f -name 'libonnxruntime*' | head -1)"
             export HINA_TTS_TEST_ASSETS="$HINA_TTS_ASSETS_DIR"
             export HINA_ASR_TEST_ASSETS="$HINA_TTS_ASSETS_DIR"
-            echo "Linux: running the trivial-ORT load test AND the real Supertonic + Nemotron pipelines"
+            echo "Linux: running the trivial-ORT load test AND the real Supertonic + Nemotron + Silero pipelines"
           elif [ "${RUNNER_OS}-${arch}" = "macOS-arm64" ]; then
             # Lighter: just the ORT library so the binding load/run test runs (the
             # ~1 GB Supertonic + Nemotron models are exercised on the Linux job).
@@ -166,7 +167,7 @@ jobs:
           else
             echo "No pinned ORT 1.26.0 CPU build for ${RUNNER_OS}-${arch}; the ONNX model tests will skip."
           fi
-          go test -tags onnx ./internal/onnx/... ./internal/tts/... ./internal/asr/...
+          go test -tags onnx ./internal/onnx/... ./internal/tts/... ./internal/asr/... ./internal/vad/...
 
   cross-compile:
     name: cross-compile targets

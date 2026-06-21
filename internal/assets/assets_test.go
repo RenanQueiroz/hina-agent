@@ -36,8 +36,11 @@ func TestManifestPlatform(t *testing.T) {
 	if unsupported {
 		t.Fatal("linux/amd64 should be supported")
 	}
-	if want := 1 + len(SupertonicAssets()) + len(NemotronAssets()); len(list) != want {
-		t.Fatalf("manifest has %d assets, want %d (ORT + Supertonic + Nemotron)", len(list), want)
+	if want := 1 + len(SupertonicAssets()) + len(NemotronAssets()) + len(VADAssets()); len(list) != want {
+		t.Fatalf("manifest has %d assets, want %d (ORT + Supertonic + Nemotron + VAD)", len(list), want)
+	}
+	if len(VADAssets()) != 1 {
+		t.Fatalf("expected exactly one Silero VAD asset, got %d", len(VADAssets()))
 	}
 	if _, unsup := Manifest("darwin", "amd64"); !unsup {
 		t.Fatal("darwin/amd64 manifest should flag ORT unsupported")
@@ -235,6 +238,25 @@ func TestASRVerified(t *testing.T) {
 	}
 	if ok, reason := ASRVerified(root); ok || reason == "" {
 		t.Fatalf("wrong encoder: ok=%v reason=%q, want not-verified", ok, reason)
+	}
+}
+
+func TestVADVerified(t *testing.T) {
+	// Nothing installed -> not verified, with a reason naming the model.
+	if ok, reason := VADVerified(t.TempDir()); ok || reason == "" {
+		t.Fatalf("empty root: ok=%v reason=%q, want not-verified + reason", ok, reason)
+	}
+	// A present-but-wrong-content model must not verify (checksum/size gate).
+	root := t.TempDir()
+	dest := filepath.Join(root, vadModels[0].dest)
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, []byte("not the real silero model"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := VADVerified(root); ok || reason == "" {
+		t.Fatalf("wrong model: ok=%v reason=%q, want not-verified", ok, reason)
 	}
 }
 

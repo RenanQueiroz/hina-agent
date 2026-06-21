@@ -26,6 +26,8 @@ func main() {
 		err = cmdMigrate(os.Args[2:])
 	case "assets":
 		err = cmdAssets(os.Args[2:])
+	case "bench":
+		err = cmdBench(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("hina", version)
 		return
@@ -52,6 +54,7 @@ Usage:
   hina doctor     Report host capabilities and feature availability
   hina migrate    Apply database migrations (migrate down [N|all] to roll back)
   hina assets     Manage local-inference downloads (status|verify|pull)
+  hina bench      Run the live-voice turn-detection benchmark suite (--json)
   hina version    Print version
 
 Pass -h after a command for its flags.

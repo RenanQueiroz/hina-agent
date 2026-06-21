@@ -439,8 +439,8 @@ func TestListenTimedStopIgnoresSupersededSegment(t *testing.T) {
 // stream, and emits a terminal — without waiting unbounded or needing the whole
 // session to close.
 func TestListenFinalizeTimeoutAbortsStalled(t *testing.T) {
-	defer func(d time.Duration) { finalizeTimeout = d }(finalizeTimeout)
-	finalizeTimeout = 30 * time.Millisecond
+	defer func(d int64) { finalizeTimeoutNs.Store(d) }(finalizeTimeoutNs.Load())
+	finalizeTimeoutNs.Store(int64(30 * time.Millisecond))
 
 	s, sink := newDSPSession()
 	// Finalize blocks forever unless Close unblocks it (closeCh), modeling a real
@@ -463,8 +463,8 @@ func TestListenFinalizeTimeoutAbortsStalled(t *testing.T) {
 // must not pin the finalize goroutine or leave the client listening: the watchdog
 // emits the terminal independent of the stream actually shutting down.
 func TestListenFinalizeTimeoutTerminalIndependentOfStream(t *testing.T) {
-	defer func(d time.Duration) { finalizeTimeout = d }(finalizeTimeout)
-	finalizeTimeout = 30 * time.Millisecond
+	defer func(d int64) { finalizeTimeoutNs.Store(d) }(finalizeTimeoutNs.Load())
+	finalizeTimeoutNs.Store(int64(30 * time.Millisecond))
 
 	s, sink := newDSPSession()
 	block := make(chan struct{})

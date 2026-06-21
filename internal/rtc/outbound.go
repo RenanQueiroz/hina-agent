@@ -123,6 +123,24 @@ func (o *outbound) interrupt(epoch uint32, playedSamples, nowMicros int64) {
 	}
 }
 
+// interruptPlayback is the server-initiated barge-in (live-voice VAD detected the
+// user talking over the assistant): truncate the active playback at the last
+// actually-played cursor and report that boundary. The live caller (bargeIn) holds
+// liveMu across this call AND the ownership check, so the "current" playback it stops
+// is guaranteed to be this session's reply — a concurrent live stop (which also takes
+// liveMu) can't interpose a newer manual/TTS playback. Returns the played-cursor
+// milliseconds and whether a playback was actually running.
+func (o *outbound) interruptPlayback() (cursorMs int64, wasPlaying bool) {
+	o.mu.Lock()
+	playedMs := o.playedMs
+	o.mu.Unlock()
+	was, _ := o.halt("barge-in", true, 0) // truncating stop of the current playback
+	if was {
+		o.s.metrics.markInterrupt()
+	}
+	return playedMs, was
+}
+
 // halt stops the pacer and clears the source, emitting PlaybackStopped with the
 // last cursor. When expectEpoch is non-zero it acts only if that epoch is still
 // the active one. It returns whether it actually stopped a running playback, plus
@@ -157,6 +175,83 @@ func (o *outbound) halt(reason string, truncated bool, expectEpoch uint32) (wasR
 		"played_samples": playedSamples,
 	})
 	return wasRunning, dropped
+}
+
+// cursorMs returns the last reported played-cursor (audible-clamped) for the active
+// epoch — the heard boundary the live worker records when a spoken reply was truncated
+// (synthesis cap / dropped frames) rather than fully delivered.
+func (o *outbound) cursorMs() int64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.playedMs
+}
+
+// resetForNextReply zeroes the playback cursor and advances the epoch WITHOUT starting
+// a pacer or emitting PlaybackStarted. The live worker calls it as a reply's committed
+// turn id is recorded (after generation, before TTS), so a barge-in in that pre-playback
+// window marks the turn at a cursor of 0 (nothing of it heard yet) rather than the
+// PREVIOUS reply's stale cursor, and the epoch bump makes a late cursor report for the
+// previous epoch be rejected. Safe because the serial reply worker guarantees no
+// playback is active at this point.
+func (o *outbound) resetForNextReply() {
+	o.mu.Lock()
+	o.epoch++
+	o.playedSamples = 0
+	o.playedMs = 0
+	o.sent = 0
+	o.dropped = 0
+	o.mu.Unlock()
+	o.s.metrics.setCursor(0, 0)
+}
+
+// playoutMargin covers the client's playback ring (RING_CAPACITY, <=120 ms @ 24 kHz)
+// plus network slack, added to the wait so the browser drains the last buffered tail.
+// maxPlayoutWait bounds the wait so a silent / dead / dropping client can't pin the
+// live worker forever.
+const (
+	playoutMargin  = 160 * time.Millisecond
+	maxPlayoutWait = 5 * time.Second
+)
+
+// waitPlayedOut blocks until the browser has PLAYED OUT this epoch's sent audio (its
+// reported cursor reaches the sent sample count) or a bounded deadline elapses. The
+// live reply worker calls this after the server-side drain so it does NOT start the
+// NEXT reply — whose PlaybackStarted resets the client worklet, dropping any still-
+// buffered tail — before the current reply finished playing on the CLIENT. The pacer
+// is already halted (o.sent frozen) when this runs. ctx cancellation (barge-in / stop /
+// close) returns immediately; a superseded epoch (a newer playback already started)
+// returns too. A clean link releases early via the cursor; a lossy/silent one waits at
+// most the bounded deadline.
+func (o *outbound) waitPlayedOut(ctx context.Context, epoch uint32) {
+	o.mu.Lock()
+	sent, played, cur := o.sent, o.playedSamples, o.epoch
+	o.mu.Unlock()
+	if cur != epoch || sent <= 0 || played >= sent {
+		return
+	}
+	deadline := time.Duration((sent-played)/samplesPerMs)*time.Millisecond + playoutMargin
+	if deadline > maxPlayoutWait {
+		deadline = maxPlayoutWait
+	}
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			return
+		case <-tick.C:
+			o.mu.Lock()
+			done := o.epoch != epoch || o.playedSamples >= o.sent
+			o.mu.Unlock()
+			if done {
+				return
+			}
+		}
+	}
 }
 
 // feedLoopback forwards decoded mic PCM (24 kHz) to the active source IFF it is
@@ -228,6 +323,21 @@ func (o *outbound) mode() string {
 	return o.source.Name()
 }
 
+// isTTSPlaying reports whether the assistant is currently speaking (a synthesized
+// reply is the active outbound source). The live loop uses this — not just whether
+// a reply is still generating — as the "assistant playing" signal, so barge-in,
+// backchannel suppression, and echo gating stay active for the WHOLE spoken reply,
+// including after generation finished and the TTS source is still draining.
+func (o *outbound) isTTSPlaying() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.running || o.source == nil {
+		return false
+	}
+	_, ok := o.source.(*ttsSource)
+	return ok
+}
+
 // pace is the pacer goroutine: every frameInterval it pulls one frame from the
 // active source, frames it, and sends it on the audio channel (subject to
 // backpressure). It exits when the context is cancelled (stop/interrupt/close).
@@ -264,6 +374,16 @@ func (o *outbound) pace(ctx context.Context) {
 			// (ttsSource.Done) is reached under a slow/stuck-but-open channel rather
 			// than hanging. The send — not the consume — is what backpressure skips.
 			real := src.Next(frame)
+			_, isTTS := src.(*ttsSource)
+			// Leading silence: a TTS source whose first segment hasn't arrived yet (a cold
+			// or slow synth) yields real==0. Don't send OR count it — otherwise the client
+			// plays and reports those silent samples as "heard", inflating the barge-in
+			// cursor (played_ms) above the audible content. A barge-in before any reply
+			// audio would then look like a partial reply instead of "[interrupted]". The
+			// finite TTS source still drains: once its audio arrives, real>0.
+			if isTTS && real == 0 {
+				continue
+			}
 			// Drop the SEND if it would push the queue past the budget, so buffered
 			// audio never exceeds maxBufferedBytes (a plain > check could still admit
 			// one more frame at the threshold). The frame is already consumed.
@@ -281,9 +401,22 @@ func (o *outbound) pace(ctx context.Context) {
 				continue
 			}
 			o.s.metrics.addOut(uint64(n))
+			// Feed echo suppression ONLY with TTS audio that was actually DELIVERED to
+			// the browser (after a successful Send, with real audio) — not frames
+			// dropped for backpressure / send errors. Otherwise, on a degraded link,
+			// undelivered frames would raise the echo guard and suppress real user
+			// speech, breaking barge-in exactly when the link is bad. Energy is computed
+			// synchronously, so passing the reused frame buffer is safe.
+			if isTTS && real > 0 {
+				o.s.observePlayback(frame)
+			}
 			o.mu.Lock()
 			if epoch == o.epoch { // ignore the rare frame sent across an epoch swap
-				o.sent += int64(len(frame))
+				// Count AUDIBLE samples only (real), not the zero-padding of a partial last
+				// frame, so the cursor upper bound the client cursor is clamped to reflects
+				// what the user could actually hear. Non-TTS sources fill the frame (real ==
+				// len) so this is unchanged for them.
+				o.sent += int64(real)
 			}
 			o.mu.Unlock()
 

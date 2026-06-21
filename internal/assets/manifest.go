@@ -20,9 +20,15 @@ const (
 	ORTVersion         = "1.26.0"
 	SupertonicRevision = "3cadd1ee6394adea1bd021217a0e650ede09a323"
 	NemotronRevision   = "f1f26d22dab5c4eabe6d01b63c906889e7e817d3"
-	supertonicBaseURL  = "https://huggingface.co/Supertone/supertonic-3/resolve/" + SupertonicRevision + "/"
-	nemotronBaseURL    = "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/" + NemotronRevision + "/"
-	ortBaseURL         = "https://github.com/microsoft/onnxruntime/releases/download/v" + ORTVersion + "/"
+	// SileroRevision is the snakers4/silero-vad commit for tag v5.1.2 (the MIT
+	// silero_vad.onnx these checksums match; research-findings B4). The model is
+	// served raw from GitHub at the pinned commit — an immutable URL, so the pin +
+	// SHA256 verify exactly the bytes the VAD engine loads.
+	SileroRevision    = "6478567951ae5c9979ad7b234185b5515f4be7a1"
+	supertonicBaseURL = "https://huggingface.co/Supertone/supertonic-3/resolve/" + SupertonicRevision + "/"
+	nemotronBaseURL   = "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/" + NemotronRevision + "/"
+	sileroBaseURL     = "https://raw.githubusercontent.com/snakers4/silero-vad/" + SileroRevision + "/"
+	ortBaseURL        = "https://github.com/microsoft/onnxruntime/releases/download/v" + ORTVersion + "/"
 )
 
 // ArchiveKind tags how a downloaded artifact is unpacked.
@@ -80,6 +86,12 @@ func ASRDir(root string) string { return filepath.Join(root, "nemotron") }
 // (encoder.onnx.data) relative to the model on disk; pass this after verifying
 // the full manifest so the loaded graph is the checksum-verified one.
 func ASREncoderPath(root string) string { return filepath.Join(ASRDir(root), "encoder.onnx") }
+
+// VADDir is the Silero VAD model directory under root (silero_vad.onnx). VADModelPath
+// is the installed model file. The VAD engine loads the model from VERIFIED BYTES
+// (it has no external-data file), so the path is only for presence reporting.
+func VADDir(root string) string       { return filepath.Join(root, "vad") }
+func VADModelPath(root string) string { return filepath.Join(VADDir(root), "silero_vad.onnx") }
 
 // ortAssets is the ORT shared library per platform. Microsoft dropped CPU builds
 // for some targets, so not every Tier-1 platform has one (e.g. macOS x64 after
@@ -195,10 +207,30 @@ func NemotronAssets() []Asset {
 	return out
 }
 
+// vadModels is the pinned Silero VAD model (MIT). It is a single self-contained
+// ONNX graph (no external weights), loaded from verified bytes. sha256 is the raw
+// file digest at the pinned commit. The HF/GitHub "path" is the in-repo path the
+// raw URL appends to sileroBaseURL.
+var vadModels = []supModel{
+	{"src/silero_vad/data/silero_vad.onnx", filepath.Join("vad", "silero_vad.onnx"), 2327524, "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f"},
+}
+
+// VADAssets returns the platform-independent Silero VAD model assets.
+func VADAssets() []Asset {
+	out := make([]Asset, 0, len(vadModels))
+	for _, m := range vadModels {
+		out = append(out, Asset{
+			Name: "vad/silero_vad.onnx", URL: sileroBaseURL + m.path,
+			SHA256: m.sha256, Size: m.size, Dest: m.dest, Archive: ArchiveNone,
+		})
+	}
+	return out
+}
+
 // Manifest is the full pinned asset set for a platform: the ORT library (when
-// available) followed by the Supertonic (TTS) and Nemotron (ASR) models.
-// unsupported is true when no ORT CPU build exists for the platform (neither
-// local TTS nor ASR can run there).
+// available) followed by the Supertonic (TTS), Nemotron (ASR), and Silero (VAD)
+// models. unsupported is true when no ORT CPU build exists for the platform (no
+// local voice can run there).
 func Manifest(goos, goarch string) (list []Asset, ortUnsupported bool) {
 	if a, ok := ORTAsset(goos, goarch); ok {
 		list = append(list, a)
@@ -207,6 +239,7 @@ func Manifest(goos, goarch string) (list []Asset, ortUnsupported bool) {
 	}
 	list = append(list, SupertonicAssets()...)
 	list = append(list, NemotronAssets()...)
+	list = append(list, VADAssets()...)
 	return list, ortUnsupported
 }
 

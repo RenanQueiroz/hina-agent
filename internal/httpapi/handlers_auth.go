@@ -110,6 +110,27 @@ func (s *Server) handleAdminRuntime(w http.ResponseWriter, _ *http.Request) {
 		LLMProvider: s.provider.Name(),
 		TTS:         wire.TTSRuntime{Enabled: s.cfg.TTS.Enabled},
 		ASR:         wire.ASRRuntime{Enabled: s.cfg.ASR.Enabled},
+		VAD:         wire.VADRuntime{Enabled: s.cfg.Voice.Enabled},
+	}
+	if s.vad != nil {
+		st := s.vad.Status()
+		out.VAD = wire.VADRuntime{
+			Enabled:    s.cfg.Voice.Enabled,
+			Available:  st.Available,
+			Loaded:     st.Loaded,
+			Reason:     st.Reason,
+			ColdLoadMs: st.ColdLoadMs,
+			ProbeCount: st.ProbeCount,
+			ErrorCount: st.ErrorCount,
+			LastError:  st.LastError,
+			Runtime: wire.ORTRuntime{
+				Available: st.Runtime.Available,
+				Version:   st.Runtime.Version,
+				Provider:  st.Runtime.Provider,
+				LibPath:   st.Runtime.LibPath,
+				Reason:    st.Runtime.Reason,
+			},
+		}
 	}
 	if s.asr != nil {
 		st := s.asr.Status()

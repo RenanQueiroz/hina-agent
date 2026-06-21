@@ -38,6 +38,13 @@ func (f *fakeSink) types() []string {
 	return out
 }
 
+// events returns a snapshot copy of all recorded events (for payload inspection).
+func (f *fakeSink) events() []events.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]events.Event(nil), f.all...)
+}
+
 func testManager(t *testing.T) (*Manager, *fakeSink) {
 	t.Helper()
 	sink := &fakeSink{}

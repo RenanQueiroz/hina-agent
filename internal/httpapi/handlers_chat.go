@@ -13,7 +13,6 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/id"
-	"github.com/RenanQueiroz/hina-agent/internal/llm"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
 	"github.com/RenanQueiroz/hina-agent/internal/wire"
 )
@@ -109,6 +108,14 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	defer s.endTurn(conv.ID)
 
 	ctx := r.Context()
+	// Wait for any in-flight interrupt mark (a live barge-in / stop on this same
+	// conversation) to commit before building context below, so a text turn never reads
+	// a pre-interrupt full assistant reply the user only partially heard. If the request
+	// ends before the fence clears (client gone / a stuck mark), abort without persisting.
+	if !s.awaitInterrupts(ctx, conv.ID) {
+		writeErr(w, http.StatusServiceUnavailable, "interrupted; please retry")
+		return
+	}
 
 	// 1. Persist the user turn together with its UserTextSubmitted event
 	//    atomically, on a non-cancelled context: once the message is accepted it
@@ -139,51 +146,38 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	asTurnID := id.New("trn")
 	s.publish(ctx, events.SourceServer, events.TypeTurnStarted, conv.ID, u.ID, asTurnID, nil)
 
-	// A failure to even start the stream is funneled through the same
-	// finalization below (set streamErr) so cancellation vs backend-error is
-	// classified by interrupted, and the durable turn+events stay atomic — never
-	// an event-only ErrorEvent for a turn that has no durable assistant turn.
-	var sb strings.Builder
-	var streamErr error
-	stream, err := s.provider.Stream(ctx, llm.Request{Messages: msgs})
-	if err != nil {
-		streamErr = err
-	} else {
-		for d := range stream {
-			if d.Err != nil {
-				streamErr = d.Err
-				break
-			}
-			if d.Done {
-				break
-			}
-			sb.WriteString(d.Text)
-			s.publishEphemeral(events.SourceServer, events.TypeAgentTextDelta, conv.ID, u.ID, asTurnID,
-				map[string]string{"delta": d.Text})
-		}
-	}
-	// A client abort (Stop/navigate-away) can surface as either a stream error or
-	// a context cancellation; either way it's an interrupt, not a backend failure.
-	interrupted := ctx.Err() != nil
+	// Stream the turn through the shared agent loop (the same loop the live-voice
+	// pipeline drives), publishing each delta to the timeline as it arrives. A
+	// failure to even start the stream is funneled through the same finalization
+	// below (Result.Err) so cancellation vs backend-error is classified by
+	// interrupted, and the durable turn+events stay atomic — never an event-only
+	// ErrorEvent for a turn that has no durable assistant turn.
+	res := s.loop.Run(ctx, msgs, func(delta string) {
+		s.publishEphemeral(events.SourceServer, events.TypeAgentTextDelta, conv.ID, u.ID, asTurnID,
+			map[string]string{"delta": delta})
+	})
+	// A client abort (Stop/navigate-away) is an interrupt, not a backend failure;
+	// the loop already classified it (Result.Err is nil when interrupted).
+	interrupted := res.Interrupted
 
 	// 4. Finalize on a non-cancelled context so a client disconnect still records
 	//    what was generated. The assistant turn and its durable event(s) are
 	//    persisted atomically (PublishTurn), so the turn never outlives its event.
-	text := sb.String()
+	text := res.Text
 
 	// A real mid-stream failure (not a client-initiated interrupt) is NOT a
 	// successful turn: record the partial as errored, emit ErrorEvent + close the
 	// turn, and return 502 — never AgentTextCompleted. (Carry the partial text in
 	// the durable ErrorEvent so reload replays exactly what BuildContext feeds the
 	// model — the live-only AgentTextDelta events aren't replayed.)
-	if streamErr != nil && !interrupted {
+	if res.Err != nil {
 		assistantTurn := store.Turn{
 			ID: asTurnID, ConversationID: conv.ID, Role: "assistant", Mode: "text",
 			CanonicalText: text, Metadata: `{"error":true}`,
 		}
 		s.finalizeTurn(conv.ID, u.ID, asTurnID, text, assistantTurn,
 			s.newEvent(events.SourceServer, events.TypeError, conv.ID, u.ID, asTurnID,
-				map[string]any{"error": streamErr.Error(), "text": text}),
+				map[string]any{"error": res.Err.Error(), "text": text}),
 			s.newEvent(events.SourceServer, events.TypeTurnCommitted, conv.ID, u.ID, asTurnID, nil),
 		)
 		writeErr(w, http.StatusBadGateway, "llm stream error")

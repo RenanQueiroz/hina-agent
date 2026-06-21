@@ -98,6 +98,7 @@ export interface RTCSessionStats {
   bytes_out: number /* uint64 */;
   frames_dropped: number /* uint64 */;
   interrupts: number /* uint64 */;
+  dropped_turns: number /* uint64 */;
   played_ms: number /* int64 */;
   capture_ms: number /* int64 */;
   app_rtt_micros: number /* int64 */;
@@ -118,6 +119,22 @@ export interface AdminRuntime {
   llm_provider: string;
   tts: TTSRuntime;
   asr: ASRRuntime;
+  vad: VADRuntime;
+}
+/**
+ * VADRuntime is the local Silero VAD engine + ONNX runtime status for the admin
+ * view. The live conversation loop (Phase 6) needs this plus TTS + ASR available.
+ */
+export interface VADRuntime {
+  enabled: boolean; // [voice] enabled
+  available: boolean;
+  loaded: boolean; // model currently resident (warm)
+  reason?: string;
+  runtime: ORTRuntime;
+  cold_load_ms: number /* int64 */;
+  probe_count: number /* int64 */;
+  error_count: number /* int64 */;
+  last_error?: string;
 }
 /**
  * ASRRuntime is the local streaming ASR (Nemotron) engine + ONNX runtime status

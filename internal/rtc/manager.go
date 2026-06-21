@@ -43,8 +43,10 @@ type Manager struct {
 	iceServers []webrtc.ICEServer
 	log        *slog.Logger
 	sink       EventSink
-	tts        tts.Engine // optional local speech engine, shared across sessions
-	asr        asr.Engine // optional local recognition engine, shared across sessions
+	tts        tts.Engine   // optional local speech engine, shared across sessions
+	asr        asr.Engine   // optional local recognition engine, shared across sessions
+	vad        VADEngine    // optional local VAD engine (Phase 6), shared across sessions
+	agent      AgentService // optional agent turn-runner (Phase 6), shared across sessions
 
 	mu        sync.Mutex
 	sessions  map[string]*Session           // userID -> active (committed) session
@@ -92,6 +94,8 @@ func NewManager(cfg Config, sink EventSink) (*Manager, error) {
 		sink:       sink,
 		tts:        cfg.TTS,
 		asr:        cfg.ASR,
+		vad:        cfg.VAD,
+		agent:      cfg.Agent,
 		sessions:   make(map[string]*Session),
 		pending:    make(map[string]*Session),
 		userGen:    make(map[string]uint64),
@@ -281,7 +285,7 @@ func (mgr *Manager) newSession(ctx context.Context, userID, conversationID, offe
 	if err != nil {
 		return nil, "", fmt.Errorf("rtc: new peer connection: %w", err)
 	}
-	s := newSession(id.New("rtc"), userID, conversationID, pc, mgr.log, mgr.sink, mgr.tts, mgr.asr)
+	s := newSession(id.New("rtc"), userID, conversationID, pc, mgr.log, mgr.sink, mgr.tts, mgr.asr, mgr.vad, mgr.agent)
 	s.onClose = func() { mgr.onSessionClosed(s) }
 	s.onReady = func() { mgr.Commit(s.id) } // commit when the control channel opens
 	s.wire()
@@ -402,6 +406,11 @@ func (mgr *Manager) CloseSession(sessionID string) {
 // ErrNoSession is returned by Speak when the user has no active live session.
 var ErrNoSession = errors.New("rtc: no active session for user")
 
+// ErrLiveActive is returned by Speak when the user's session is in live conversation
+// mode, where the assistant's voice is the server-driven agent reply (manual speak
+// is rejected).
+var ErrLiveActive = errors.New("rtc: live conversation active; manual speak not allowed")
+
 // Speak synthesizes text into the user's active live session over the outbound
 // audio path (server-driven TTS, e.g. speaking a chat reply aloud). It returns
 // ErrNoSession if the user has no active call, or the session's synchronous
@@ -412,6 +421,12 @@ func (mgr *Manager) Speak(userID, text string, opts tts.Options) error {
 	mgr.mu.Unlock()
 	if sess == nil {
 		return ErrNoSession
+	}
+	// While the user is in a live conversation, the assistant's voice is the agent
+	// reply (server-driven). Reject a manual speak so it can't play over a live reply
+	// or confuse barge-in turn-attribution — mirroring the datachannel SpeakText guard.
+	if sess.liveActive() {
+		return ErrLiveActive
 	}
 	return sess.speak(text, opts)
 }

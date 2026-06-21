@@ -5,6 +5,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/RenanQueiroz/hina-agent/internal/agent"
 	"github.com/RenanQueiroz/hina-agent/internal/asr"
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/config"
@@ -24,6 +26,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/rtc"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
 	"github.com/RenanQueiroz/hina-agent/internal/tts"
+	"github.com/RenanQueiroz/hina-agent/internal/vad"
 	"github.com/RenanQueiroz/hina-agent/internal/wire"
 	webui "github.com/RenanQueiroz/hina-agent/web"
 )
@@ -35,21 +38,29 @@ type Server struct {
 	bus      *events.Bus
 	auth     *auth.Manager
 	provider llm.Provider
+	loop     *agent.Loop // shared agent turn loop (text mode here; voice reuses it)
 	rtc      *rtc.Manager
 	tts      tts.Engine
 	asr      asr.Engine
+	vad      vadStatuser
 	logs     *logbuf.Buffer
 	log      *slog.Logger
 	ready    atomic.Bool
 	handler  http.Handler
 
-	turnMu      sync.Mutex      // guards activeTurns
+	turnMu      sync.Mutex      // guards activeTurns + pendingInterrupts
 	activeTurns map[string]bool // conversationID -> a turn is in flight
+	// pendingInterrupts is a per-conversation happens-before fence: an interrupt mark
+	// (barge-in / stop / TTS truncation) reserves it SYNCHRONOUSLY before the interrupt
+	// is observable, and every turn entry point (RunTurn / handlePostMessage) waits for
+	// it to clear before building context — so a next turn (voice OR a concurrent text
+	// POST) can never read the pre-interrupt FULL assistant text.
+	pendingInterrupts map[string]int
 }
 
 // New builds the server and its handler.
 func New(cfg config.Config, st *store.Store, bus *events.Bus, am *auth.Manager, provider llm.Provider, logs *logbuf.Buffer, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, bus: bus, auth: am, provider: provider, logs: logs, log: log, activeTurns: make(map[string]bool)}
+	s := &Server{cfg: cfg, store: st, bus: bus, auth: am, provider: provider, loop: agent.NewLoop(provider, nil), logs: logs, log: log, activeTurns: make(map[string]bool), pendingInterrupts: make(map[string]int)}
 	s.handler = s.withMiddleware(s.routes())
 	return s
 }
@@ -77,6 +88,57 @@ func (s *Server) endTurn(conversationID string) {
 	s.turnMu.Unlock()
 }
 
+// reserveInterrupt registers an in-flight interrupt mark for a conversation and returns
+// a release. The caller (a barge-in / stop / TTS-truncation path) reserves SYNCHRONOUSLY
+// before the interrupt is observable, performs the durable mark, then releases — so a
+// turn entry point that awaitInterrupts can't read context until the mark commits/fails.
+func (s *Server) reserveInterrupt(conversationID string) func() {
+	s.turnMu.Lock()
+	s.pendingInterrupts[conversationID]++
+	s.turnMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.turnMu.Lock()
+			if s.pendingInterrupts[conversationID] <= 1 {
+				delete(s.pendingInterrupts, conversationID)
+			} else {
+				s.pendingInterrupts[conversationID]--
+			}
+			s.turnMu.Unlock()
+		})
+	}
+}
+
+// BeginInterrupt implements rtc.AgentService: reserve the interrupt fence (see
+// reserveInterrupt). The live loop calls this synchronously, BEFORE a barge-in/stop is
+// observable, then MarkTurnInterrupted, then the returned release.
+func (s *Server) BeginInterrupt(conversationID string) func() {
+	return s.reserveInterrupt(conversationID)
+}
+
+// awaitInterrupts blocks until no interrupt mark is in flight for the conversation,
+// returning true when the fence actually CLEARED. It returns FALSE if ctx ended first
+// (client disconnect / a stuck mark past the deadline): the caller must then abort —
+// NOT build context or persist a turn — since the pre-interrupt full reply might still
+// be the durable state. Turn entry points call it after claiming the turn lock and
+// BEFORE building context (the happens-before edge against a stale next turn).
+func (s *Server) awaitInterrupts(ctx context.Context, conversationID string) bool {
+	for {
+		s.turnMu.Lock()
+		n := s.pendingInterrupts[conversationID]
+		s.turnMu.Unlock()
+		if n == 0 {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+}
+
 // Handler returns the configured HTTP handler.
 func (s *Server) Handler() http.Handler { return s.handler }
 
@@ -94,6 +156,19 @@ func (s *Server) SetTTS(e tts.Engine) { s.tts = e }
 // SetASR installs the local ASR engine (post-construction). May be nil (ASR off);
 // the admin runtime view reports it as disabled/unavailable accordingly.
 func (s *Server) SetASR(e asr.Engine) { s.asr = e }
+
+// vadStatuser is the subset of the VAD engine the admin runtime view needs. An
+// interface keeps httpapi decoupled from the concrete engine and testable.
+type vadStatuser interface{ Status() vad.Status }
+
+// SetVAD installs the local VAD engine (post-construction). May be nil (live voice
+// off); the admin runtime view reports it as disabled/unavailable accordingly.
+func (s *Server) SetVAD(e vadStatuser) {
+	if e == nil {
+		return
+	}
+	s.vad = e
+}
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()

@@ -271,6 +271,103 @@ describe("LiveSession TTS completion", () => {
   });
 });
 
+describe("LiveSession live conversation (Phase 6)", () => {
+  type Conv = {
+    conversing?: boolean;
+    turnDetection?: string;
+    speaking?: boolean;
+    partial?: string;
+    transcript?: string;
+    agentReply?: string;
+    replyInterrupted?: boolean;
+  };
+
+  it("drives a turn through the live loop: speech -> transcript -> streamed reply", () => {
+    const states: Conv[] = [];
+    const s = new LiveSession((st) => states.push(st)) as unknown as {
+      onControl: (data: string) => void;
+    };
+    s.onControl(
+      JSON.stringify({ type: "SessionUpdated", payload: { live: true, turn_detection: { type: "server_vad" } } }),
+    );
+    expect(states.at(-1)?.conversing).toBe(true);
+    expect(states.at(-1)?.turnDetection).toBe("server_vad");
+
+    // VAD detects the user speaking; live events are seg-tagged (turn 1).
+    s.onControl(JSON.stringify({ type: "SpeechStarted", payload: { sample_rate: 16000, seg: 1 } }));
+    expect(states.at(-1)?.speaking).toBe(true);
+    s.onControl(JSON.stringify({ type: "ASRPartial", payload: { text: "turn on the", seg: 1 } }));
+    expect(states.at(-1)?.partial).toBe("turn on the");
+
+    // The turn commits -> user transcript shown, reply buffer reset.
+    s.onControl(
+      JSON.stringify({
+        type: "ASRFinal",
+        payload: { text: "hina turn on the lights", body: "turn on the lights", seg: 1 },
+      }),
+    );
+    expect(states.at(-1)?.transcript).toBe("hina turn on the lights");
+    expect(states.at(-1)?.speaking).toBe(false);
+
+    // The assistant reply streams in via AgentTextDelta (same turn seg).
+    s.onControl(JSON.stringify({ type: "AgentTextDelta", payload: { delta: "Sure, ", seg: 1 } }));
+    s.onControl(JSON.stringify({ type: "AgentTextDelta", payload: { delta: "lights on.", seg: 1 } }));
+    expect(states.at(-1)?.agentReply).toBe("Sure, lights on.");
+  });
+
+  it("drops a late terminal from an older live turn (per-turn seg gating)", () => {
+    const states: Conv[] = [];
+    const s = new LiveSession((st) => states.push(st)) as unknown as {
+      onControl: (data: string) => void;
+    };
+    s.onControl(JSON.stringify({ type: "SessionUpdated", payload: { live: true, turn_detection: { type: "server_vad" } } }));
+    // Turn 1 starts, then turn 2 starts (the user spoke again).
+    s.onControl(JSON.stringify({ type: "SpeechStarted", payload: { seg: 1 } }));
+    s.onControl(JSON.stringify({ type: "SpeechStarted", payload: { seg: 2 } }));
+    s.onControl(JSON.stringify({ type: "ASRPartial", payload: { text: "second turn words", seg: 2 } }));
+    expect(states.at(-1)?.speaking).toBe(true);
+    expect(states.at(-1)?.partial).toBe("second turn words");
+
+    // A late finalize from turn 1 (slow recognizer) must NOT clobber turn 2's live UI:
+    // it would otherwise clear speaking + overwrite the partial with turn 1's transcript.
+    s.onControl(JSON.stringify({ type: "ASRFinal", payload: { text: "first turn", body: "first turn", seg: 1 } }));
+    s.onControl(JSON.stringify({ type: "SpeechStopped", payload: { reason: "commit", seg: 1 } }));
+    expect(states.at(-1)?.speaking).toBe(true); // still turn 2, not cleared
+    expect(states.at(-1)?.partial).toBe("second turn words"); // not overwritten
+    expect(states.at(-1)?.transcript).not.toBe("first turn");
+  });
+
+  it("drops a stale seg-tagged ErrorEvent from an older live turn", () => {
+    const states: Array<{ error?: string }> = [];
+    const s = new LiveSession((st) => states.push(st)) as unknown as {
+      onControl: (data: string) => void;
+    };
+    s.onControl(JSON.stringify({ type: "SessionUpdated", payload: { live: true, turn_detection: { type: "server_vad" } } }));
+    s.onControl(JSON.stringify({ type: "SpeechStarted", payload: { seg: 1 } }));
+    s.onControl(JSON.stringify({ type: "SpeechStarted", payload: { seg: 2 } }));
+    // A late recognition error from turn 1 must not surface on turn 2's UI.
+    s.onControl(JSON.stringify({ type: "ErrorEvent", payload: { error: "recognition timed out", seg: 1 } }));
+    expect(states.at(-1)?.error).toBeUndefined();
+    // A current-turn error does surface.
+    s.onControl(JSON.stringify({ type: "ErrorEvent", payload: { error: "boom", seg: 2 } }));
+    expect(states.at(-1)?.error).toBe("boom");
+  });
+
+  it("marks the reply interrupted on a barge-in, and exits on SessionUpdated{live:false}", () => {
+    const states: Conv[] = [];
+    const s = new LiveSession((st) => states.push(st)) as unknown as {
+      onControl: (data: string) => void;
+    };
+    s.onControl(JSON.stringify({ type: "SessionUpdated", payload: { live: true, turn_detection: { type: "server_vad" } } }));
+    s.onControl(JSON.stringify({ type: "AgentTextDelta", payload: { delta: "A long answer" } }));
+    s.onControl(JSON.stringify({ type: "ConversationTruncated", payload: { cursor_ms: 320 } }));
+    expect(states.at(-1)?.replyInterrupted).toBe(true);
+
+    s.onControl(JSON.stringify({ type: "SessionUpdated", payload: { live: false } }));
+    expect(states.at(-1)?.conversing).toBe(false);
+  });
+});
+
 describe("LiveSession ASR segments", () => {
   it("ignores a stale ASRFinal/partial from a previous segment", () => {
     const states: Array<{ listening?: boolean; transcript?: string; partial?: string }> = [];

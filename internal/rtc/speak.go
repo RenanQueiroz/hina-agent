@@ -38,15 +38,28 @@ func (s *Session) cancelSpeak() {
 // HTTP caller can map it to a status) and emitted as an error event (so the
 // datachannel/SSE client sees it); the active reply is left untouched on rejection.
 func (s *Session) speak(text string, opts tts.Options) error {
+	_, _, _, err := s.speakStream(text, opts)
+	return err
+}
+
+// speakStream is speak that also returns a channel CLOSED when this spoken reply's
+// server-side send FINISHES (the pacer drained the source and halted) — whether it
+// drained naturally or was cut short by a barge-in / supersede / stop / close — plus
+// the playback epoch. The live reply worker waits on the channel AND then on the
+// client's playout (out.waitPlayedOut(epoch)) so the NEXT turn's reply can't replace
+// this one's audio outside the barge-in path (the only way a reply should be truncated,
+// and the only way the turn is durably marked interrupted). done is nil (epoch 0) when
+// the request was rejected or superseded before playback started.
+func (s *Session) speakStream(text string, opts tts.Options) (<-chan struct{}, *speakResult, uint32, error) {
 	if s.tts == nil || !s.tts.Available() {
-		return s.rejectSpeak(tts.ErrUnavailable)
+		return nil, nil, 0, s.rejectSpeak(tts.ErrUnavailable)
 	}
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return s.rejectSpeak(errors.New("tts: empty text"))
+		return nil, nil, 0, s.rejectSpeak(errors.New("tts: empty text"))
 	}
 	if len(text) > maxSpeakBytes {
-		return s.rejectSpeak(fmt.Errorf("tts: text too long (%d bytes, max %d)", len(text), maxSpeakBytes))
+		return nil, nil, 0, s.rejectSpeak(fmt.Errorf("tts: text too long (%d bytes, max %d)", len(text), maxSpeakBytes))
 	}
 
 	// Record this request's ARRIVAL generation. The winner among concurrent speaks
@@ -64,7 +77,7 @@ func (s *Session) speak(text string, opts tts.Options) error {
 	stream, err := s.tts.Synthesize(ctx, text, opts)
 	if err != nil {
 		cancel()
-		return s.rejectSpeak(err)
+		return nil, nil, 0, s.rejectSpeak(err)
 	}
 
 	// Commit ATOMICALLY under speakMu, but only if we're STILL the current request:
@@ -77,7 +90,7 @@ func (s *Session) speak(text string, opts tts.Options) error {
 	if s.speakGen != myGen {
 		s.speakMu.Unlock()
 		cancel()
-		return nil // superseded before we could start — not an error
+		return nil, nil, 0, nil // superseded before we could start — not an error
 	}
 	if s.speakCancel != nil {
 		s.speakCancel()
@@ -90,8 +103,26 @@ func (s *Session) speak(text string, opts tts.Options) error {
 	s.emit(events.TypeTTSStarted, map[string]any{"text": text, "epoch": epoch})
 	s.emitPlaybackStarted(ModeTTS, epoch)
 
-	go s.runSpeak(ctx, cancel, src, epoch, stream)
-	return nil
+	// done closes when runSpeak returns (playback drained OR cancelled), so the live
+	// worker can await spoken-playback completion, not just synthesis start. res carries
+	// the OUTCOME (truncated vs cancelled) so the live path can durably mark an assistant
+	// turn the user heard only partially / not at all.
+	res := &speakResult{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.runSpeak(ctx, cancel, src, epoch, stream, res)
+	}()
+	return done, res, epoch, nil
+}
+
+// speakResult reports how a spoken reply ended, for the live worker to durably reflect
+// in the assistant turn's metadata. cancelled means a barge-in / stop / supersede cut it
+// (those paths mark the turn themselves); truncated means a synthesis cap, dropped
+// frames, or a hard TTS error left the user hearing less than the full text.
+type speakResult struct {
+	cancelled bool
+	truncated bool
 }
 
 // rejectSpeak emits an error event (datachannel/SSE observability) and returns the
@@ -104,13 +135,22 @@ func (s *Session) rejectSpeak(err error) error {
 // runSpeak drives one spoken reply: consume the synthesis stream, resample, feed
 // the source, then wait for the pacer to drain it (or for a barge-in/supersede/
 // close) before stopping playback and emitting TTSCompleted.
-func (s *Session) runSpeak(ctx context.Context, cancel context.CancelFunc, src *ttsSource, epoch uint32, stream *tts.Stream) {
+func (s *Session) runSpeak(ctx context.Context, cancel context.CancelFunc, src *ttsSource, epoch uint32, stream *tts.Stream, res *speakResult) {
 	defer cancel()
+	// setRes records the outcome for the live worker (nil for manual SpeakText, which
+	// ignores it). A hard error means the user heard less than the full text.
+	setRes := func(cancelled, truncated bool) {
+		if res != nil {
+			res.cancelled = cancelled
+			res.truncated = truncated
+		}
+	}
 
 	rs, err := audio.NewResampler(stream.SampleRate(), audio.OutputSampleRate)
 	if err != nil {
 		s.emit(events.TypeError, map[string]string{"error": "tts resampler: " + err.Error()})
 		s.out.halt("tts-error", true, epoch) // an error stop is truncating (drop buffered audio)
+		setRes(false, true)
 		return
 	}
 
@@ -143,14 +183,17 @@ consume:
 		// A cancellation (barge-in / supersede / unknown mode change / close) is a
 		// TRUNCATING stop: the reply did not reach its natural end, so the browser
 		// drops buffered audio + closes its gate. truncated=false is reserved for the
-		// fully-drained completion below.
+		// fully-drained completion below. The cancelling path (bargeIn/stopLive) marks
+		// the turn, so flag cancelled (not truncated) here.
 		s.out.halt("tts-cancelled", true, epoch)
+		setRes(true, false)
 		return
 	}
 	// A synthesis error (not a cancellation) ends the reply with an error event.
 	if serr := stream.Err(); serr != nil {
 		s.emit(events.TypeError, map[string]string{"error": "tts: " + serr.Error()})
 		s.out.halt("tts-error", true, epoch)
+		setRes(false, true)
 		return
 	}
 
@@ -177,6 +220,7 @@ consume:
 			// count is captured atomically inside halt for THIS epoch.
 			truncated := stream.Truncated() || dropped > 0
 			s.emit(events.TypeTTSCompleted, map[string]any{"epoch": epoch, "truncated": truncated})
+			setRes(false, truncated)
 		}
 	case <-ctx.Done():
 		// Cancelled DURING the drain wait (barge-in / supersede / unknown mode /
@@ -184,6 +228,7 @@ consume:
 		// audio + closes its gate. Epoch-guarded, so a newer playback that already
 		// replaced us is untouched.
 		s.out.halt("tts-cancelled", true, epoch)
+		setRes(true, false)
 		return
 	}
 }

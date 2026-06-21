@@ -19,6 +19,7 @@ type SessionStats struct {
 	BytesOut      uint64 `json:"bytes_out"`
 	FramesDropped uint64 `json:"frames_dropped"`
 	Interrupts    uint64 `json:"interrupts"`
+	DroppedTurns  uint64 `json:"dropped_turns"` // committed live turns dropped because the reply queue was full
 
 	// Cursor + latency reported by the browser AudioWorklet.
 	PlayedMs     int64 `json:"played_ms"`
@@ -43,6 +44,7 @@ type Metrics struct {
 	bytesOut      uint64
 	framesDropped uint64
 	interrupts    uint64
+	droppedTurns  uint64
 
 	playedMs  int64
 	captureMs int64
@@ -89,6 +91,14 @@ func (m *Metrics) markInterrupt() {
 	m.mu.Unlock()
 }
 
+// markDroppedTurn counts a committed live turn discarded because the serial reply
+// queue was full (bounded backpressure) — surfaced so the loss isn't silent.
+func (m *Metrics) markDroppedTurn() {
+	m.mu.Lock()
+	m.droppedTurns++
+	m.mu.Unlock()
+}
+
 func (m *Metrics) setCursor(playedMs, rttMicros int64) {
 	m.mu.Lock()
 	m.playedMs = playedMs
@@ -122,6 +132,7 @@ func (m *Metrics) snapshot() SessionStats {
 		BytesOut:        m.bytesOut,
 		FramesDropped:   m.framesDropped,
 		Interrupts:      m.interrupts,
+		DroppedTurns:    m.droppedTurns,
 		PlayedMs:        m.playedMs,
 		CaptureMs:       m.captureMs,
 		AppRTTMicros:    m.rttMicros,

@@ -13,11 +13,13 @@
 package rtc
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/RenanQueiroz/hina-agent/internal/asr"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/tts"
+	"github.com/RenanQueiroz/hina-agent/internal/vad"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -56,6 +58,40 @@ type EventSink interface {
 	PublishEphemeral(e events.Event)
 }
 
+// VADEngine produces per-session voice-activity-detection streams for the live
+// loop. *vad.Engine satisfies it; an interface keeps rtc testable with a fake VAD.
+type VADEngine interface {
+	Available() bool
+	NewStream(ctx context.Context, p vad.Params) (*vad.Stream, error)
+}
+
+// AgentService runs one conversational turn for the live-voice loop and persists
+// it to the shared timeline, so spoken turns render alongside text turns and a
+// text↔live switch preserves context (no audio rehydration). httpapi implements it
+// over the store + event bus + the shared agent.Loop; an interface keeps rtc free
+// of those dependencies and easy to test. onDelta streams assistant text as it is
+// generated (for the live timeline + TTS). ctx cancellation (barge-in / teardown)
+// interrupts the reply with the partial preserved.
+type AgentService interface {
+	// RunTurn persists the user transcript + runs the agent, returning the assistant
+	// reply text and the durable assistant turn id. A non-nil error means the turn was
+	// NOT durably persisted, so the caller must not speak it. onCommitted, if non-nil, is
+	// invoked with the committed assistant turn id AFTER the durable commit but BEFORE
+	// RunTurn releases the per-conversation turn lock — so the live loop can record the
+	// turn id (and reserve the interrupt/playback fence) under that lock, closing the gap
+	// where a next turn could read the just-committed reply.
+	RunTurn(ctx context.Context, convID, userID, transcript string, onDelta func(string), onCommitted func(turnID string)) (reply, turnID string, err error)
+	// MarkTurnInterrupted durably records that an already-committed assistant turn was
+	// interrupted by a barge-in that truncated its spoken playback at playedMs, so a
+	// reload / the next model context reflects that the user heard only a prefix.
+	MarkTurnInterrupted(ctx context.Context, convID, userID, turnID string, playedMs int64) error
+	// BeginInterrupt reserves a per-conversation interrupt FENCE and returns its release.
+	// The live loop calls it SYNCHRONOUSLY before an interrupt becomes observable, then
+	// MarkTurnInterrupted, then release — so a next turn (voice or a concurrent text POST)
+	// can't build context until the interrupt mark commits.
+	BeginInterrupt(convID string) (release func())
+}
+
 // Config configures the Manager. ICEServers is optional: localhost and most LAN
 // setups connect on host candidates alone, so the default (none) works without
 // any external STUN/TURN dependency. TTS is the optional local speech engine
@@ -65,5 +101,7 @@ type Config struct {
 	ICEServers []webrtc.ICEServer
 	TTS        tts.Engine
 	ASR        asr.Engine
+	VAD        VADEngine    // optional local VAD engine (Phase 6); nil disables live mode
+	Agent      AgentService // optional agent turn-runner (Phase 6); nil disables live replies
 	Log        *slog.Logger
 }

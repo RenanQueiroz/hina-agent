@@ -76,6 +76,21 @@ const (
 	TypeASRFinal      = "ASRFinal"
 )
 
+// Phase 6 live-voice event types. SessionUpdate is the client→server control that
+// turns the live conversation loop on/off and carries the OpenAI-shaped
+// turn_detection config (null turn_detection exits live mode); SessionUpdated is
+// the ack. Server-VAD turn boundaries are reported as SpeechStarted/SpeechStopped
+// (distinct from the manual ListenStarted/Stopped). On a confirmed barge-in the
+// server emits UserInterrupted (already defined, Phase 3) + ConversationTruncated,
+// which carries the assistant turn truncated to the last actually-played audio.
+const (
+	TypeSessionUpdate         = "SessionUpdate"  // client->server: enable/disable live mode + turn_detection
+	TypeSessionUpdated        = "SessionUpdated" // server->client: live-mode ack with the active config
+	TypeSpeechStarted         = "SpeechStarted"  // server->client: VAD detected speech onset (turn opened)
+	TypeSpeechStopped         = "SpeechStopped"  // server->client: VAD committed/cancelled the turn
+	TypeConversationTruncated = "ConversationTruncated"
+)
+
 // Event is the typed envelope. JSON field names are the wire contract; note
 // ConversationID serializes as "session_id" (the product-level "session").
 type Event struct {

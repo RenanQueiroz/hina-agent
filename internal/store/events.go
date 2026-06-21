@@ -67,6 +67,40 @@ func (s *Store) AppendTurnWithEvents(ctx context.Context, t Turn, evs []*Event) 
 	return tx.Commit()
 }
 
+// UpdateTurnMetadataWithEvents replaces an existing turn's metadata AND appends its
+// durable event(s) in a SINGLE transaction, so the metadata change (e.g. marking a
+// voice turn interrupted after a barge-in) and the event that announces it (e.g.
+// ConversationTruncated) can never diverge — either both commit or neither does.
+// Returns ErrNotFound if the turn doesn't exist (so a truncation event is never
+// published for a missing turn). Each event's Seq/ServerTS are filled in. Callers
+// must serialize per conversation (the bus does, under its mutex).
+func (s *Store) UpdateTurnMetadataWithEvents(ctx context.Context, turnID, metadata string, evs []*Event) error {
+	if metadata == "" {
+		metadata = "{}"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `UPDATE turns SET metadata=? WHERE id=?`, metadata, turnID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrNotFound // no such turn — don't publish a truncation event for it
+	}
+	for _, e := range evs {
+		if err := insertEventTx(ctx, tx, e); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // CreateConversationWithEvent inserts a conversation and its first durable event
 // (SessionCreated) in a single transaction, so the API can never return a
 // created conversation whose creation event is missing from the replayed log

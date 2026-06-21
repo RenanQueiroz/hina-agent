@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Ear, Mic, MicOff, MessageSquare, Radio, Square, Volume2 } from "lucide-react";
 import { LiveSession, type LiveState } from "../lib/rtc";
+import { api } from "../lib/api";
 import { Button, Card } from "../components/ui";
 
 // LivePage is the Phase 3 "go live" test surface: capture the mic over WebRTC,
@@ -12,6 +13,7 @@ export function LivePage() {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState<string>("");
   const [speakText, setSpeakText] = useState("");
+  const [convMode, setConvMode] = useState<"server_vad" | "semantic_vad">("server_vad");
   const sessionRef = useRef<LiveSession | null>(null);
 
   // When a session reaches a terminal state — including a server-side
@@ -50,7 +52,11 @@ export function LivePage() {
     const session = new LiveSession(onState);
     sessionRef.current = session;
     try {
-      await session.connect({ deviceId: deviceId || undefined });
+      // The live loop's "Converse" mode persists spoken turns to a conversation, so
+      // bind the call to an owned conversation (the server rejects live mode without
+      // one). Loopback/tone/Speak/Listen also operate within it harmlessly.
+      const conv = await api.createConversation("Live voice");
+      await session.connect({ deviceId: deviceId || undefined, conversationId: conv.id });
       // Labels become available once mic permission is granted.
       refreshDevices();
     } catch {
@@ -101,21 +107,21 @@ export function LivePage() {
           )}
           <Button
             variant="ghost"
-            disabled={state.status !== "connected"}
+            disabled={state.status !== "connected" || state.conversing}
             onClick={() => sessionRef.current?.setMode("loopback")}
           >
             <Volume2 size={16} /> Loopback
           </Button>
           <Button
             variant="ghost"
-            disabled={state.status !== "connected"}
+            disabled={state.status !== "connected" || state.conversing}
             onClick={() => sessionRef.current?.setMode("tone")}
           >
             <Volume2 size={16} /> Tone
           </Button>
           <Button
             variant="ghost"
-            disabled={state.status !== "connected" || state.mode === "idle"}
+            disabled={state.status !== "connected" || state.conversing || state.mode === "idle"}
             onClick={() => sessionRef.current?.interrupt()}
           >
             <Square size={16} /> Interrupt
@@ -137,13 +143,15 @@ export function LivePage() {
         />
         <div className="mt-2 flex items-center gap-2">
           <Button
-            disabled={state.status !== "connected" || speakText.trim() === ""}
+            disabled={state.status !== "connected" || state.conversing || speakText.trim() === ""}
             onClick={() => sessionRef.current?.speak(speakText.trim())}
           >
             <MessageSquare size={16} /> Speak
           </Button>
           <span className="text-xs text-zinc-400">
-            Requires local TTS enabled on the server ([tts] + onnx build + assets).
+            {state.conversing
+              ? "Disabled during a live conversation (the assistant's voice is the agent reply)."
+              : "Requires local TTS enabled on the server ([tts] + onnx build + assets)."}
           </span>
         </div>
       </Card>
@@ -185,6 +193,66 @@ export function LivePage() {
             {state.transcriptTruncated && (
               <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
                 {truncationNote(state.transcriptTruncationReason)}
+              </p>
+            )}
+          </div>
+        )}
+      </Card>
+
+      <Card className="mb-4 p-4">
+        <h2 className="mb-2 text-sm font-semibold text-zinc-600 dark:text-zinc-300">
+          Converse (live voice)
+        </h2>
+        <div className="flex flex-wrap items-center gap-2">
+          {!state.conversing ? (
+            <>
+              <Button
+                disabled={state.status !== "connected"}
+                onClick={() => sessionRef.current?.startConversation(convMode)}
+              >
+                <Radio size={16} /> Start conversation
+              </Button>
+              <select
+                value={convMode}
+                onChange={(e) => setConvMode(e.target.value as "server_vad" | "semantic_vad")}
+                className="rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+              >
+                <option value="server_vad">Server VAD</option>
+                <option value="semantic_vad">Semantic VAD</option>
+              </select>
+            </>
+          ) : (
+            <Button variant="danger" onClick={() => sessionRef.current?.stopConversation()}>
+              <Square size={16} /> End conversation
+            </Button>
+          )}
+          <span className="text-xs text-zinc-400">
+            Just talk — Hina detects your turns, replies aloud, and you can talk over it to interrupt.
+            Requires local VAD + ASR + TTS ([voice]/[asr]/[tts] + onnx build + assets).
+          </span>
+        </div>
+        {state.conversing && (
+          <div className="mt-3 space-y-2">
+            <p className="text-xs text-zinc-400">
+              {state.speaking ? "Listening…" : "Waiting for you to speak"} · turn detection:{" "}
+              <span className="font-mono">{state.turnDetection ?? convMode}</span>
+            </p>
+            {state.partial && <p className="text-sm italic text-zinc-500">{state.partial}</p>}
+            {state.transcript !== undefined && (
+              <p className="text-sm">
+                <span className="font-medium text-zinc-500">You:</span>{" "}
+                <span className="text-zinc-800 dark:text-zinc-200">
+                  {state.transcript || <span className="text-zinc-400">(no speech detected)</span>}
+                </span>
+              </p>
+            )}
+            {state.agentReply && (
+              <p className="text-sm">
+                <span className="font-medium text-indigo-500">Hina:</span>{" "}
+                <span className="text-zinc-800 dark:text-zinc-200">{state.agentReply}</span>
+                {state.replyInterrupted && (
+                  <span className="ml-1 text-xs text-amber-600 dark:text-amber-400">[interrupted]</span>
+                )}
               </p>
             )}
           </div>

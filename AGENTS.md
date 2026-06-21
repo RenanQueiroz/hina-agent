@@ -24,7 +24,7 @@ If you're unsure whether a doc is affected, check it. When you finish a task, it
 
 A server-first, web-first, **multi-user voice and text agent** (V2), cross-platform from commit 1 (Windows 11 x64, macOS Apple Silicon, Linux x86_64). One Go binary (`cmd/hina`) serves a versioned JSON/SSE API and an embedded React/Vite web client. Local **and** cloud STT-LLM-TTS, Docker `sbx` sandboxing, per-user secrets, and callable-agent Automations land across a phased roadmap.
 
-Current state: **Phases 1–5 complete** — control plane, streaming text chat, a pure-Go WebRTC audio bridge, local TTS (Supertonic), and local streaming ASR (Nemotron 3.5) — both via ONNX Runtime behind the `onnx` build tag, with agent-name biasing and wake-word stripping. See `README.md` for the per-phase feature breakdown and `plans/roadmap.md` for what's next.
+Current state: **Phases 1–6 complete** — control plane, streaming text chat, a pure-Go WebRTC audio bridge, local TTS (Supertonic), local streaming ASR (Nemotron 3.5), and the **live voice pipeline** (Silero VAD + semantic VAD + speak-to-interrupt barge-in + echo/backchannel handling, a shared agent loop, and a benchmark harness) — all local inference via ONNX Runtime behind the `onnx` build tag. See `README.md` for the per-phase feature breakdown and `plans/roadmap.md` for what's next.
 
 ## Repository map
 
@@ -41,14 +41,17 @@ internal/
   id/                Prefixed, URL-safe random IDs
   logbuf/            In-memory log ring buffer fanned out to the admin UI
   llm/               Streaming text provider abstraction: mock | openai (Responses API) | openai-compat
-  agent/             Builds model context from a conversation's canonical turns
+  agent/             Context builder from canonical turns + the shared cancellable agent Loop (text + voice run it; tool-call hook reserved for Phase 7)
   wire/              JSON DTOs exchanged with the web client (source for generated TS)
   audio/             Resample (48k→16k/24k), PCM↔float32, tone generator, binary audio-frame framing
-  rtc/               Pion WebRTC bridge: session lifecycle, inbound mic pipeline, outbound PCM pacer, control events, metrics, TTS speak
+  rtc/               Pion WebRTC bridge: session lifecycle, inbound mic pipeline, outbound PCM pacer, control events, metrics, TTS speak, and the Phase 6 live-voice loop (live.go: VAD→ASR→agent→TTS + barge-in)
   onnx/              ONNX Runtime abstraction (Backend/Session/Tensor: f32/i64/i32) + lazy-load/idle-unload Lifecycle; ORT binding behind the `onnx` build tag, CGo-free stub by default
   tts/               Supertonic 3 TTS port: text prep + tokenizer, sentence splitter, voice vectors, the 4-graph pipeline (CGo-free; runs on internal/onnx)
   asr/               Nemotron 3.5 streaming ASR port: Go log-mel front-end + FFT, SentencePiece tokenizer, cache-aware encoder + RNNT greedy decode, name-biasing trie, wake-word strip (CGo-free; runs on internal/onnx)
-  assets/            Pinned local-inference downloads (ORT + Supertonic + Nemotron models) with SHA256 verify/extract; drives `hina assets`
+  vad/               Silero VAD port: pure-Go online turn-boundary state machine + pre-roll over the shared internal/onnx runtime (CGo-free; real model behind the `onnx` tag)
+  voice/             Live turn detection: OpenAI-shaped turn_detection config, semantic VAD v1, backchannel filter, echo suppression, composed into a Pipeline (pure-Go; driven by rtc + bench)
+  bench/             Live-voice benchmark harness: replays labeled fixtures through the real pipeline, percentile metrics (drives `hina bench`; non-interactive on every host)
+  assets/            Pinned local-inference downloads (ORT + Supertonic + Nemotron + Silero models) with SHA256 verify/extract; drives `hina assets`
 web/                 React 19 + Vite + Tailwind client (embedded into the binary via web/dist)
   src/lib/*.gen.ts   Generated from internal/wire + internal/events by tygo — DO NOT EDIT by hand
 plans/               Design docs: roadmap.md, hina-agent-plan.md, research-findings.md, phase-NN-*.md
@@ -94,7 +97,7 @@ npm --prefix web run e2e      # Playwright (CI-only by default; needs a running 
 4. If you touched anything CGo/ONNX-tagged: `make build-onnx` + `make vet-onnx`, and `make test-onnx` (provide an ORT 1.26.0 lib via `ONNXRUNTIME_SHARED_LIBRARY_PATH` to exercise the model tests rather than skip them).
 5. Web: `typecheck`, `test`, `build` all green.
 6. If you changed `internal/wire` or `internal/events`: `make gen-ts` and commit the regenerated `web/src/lib/*.gen.ts` (CI fails on drift).
-7. Smoke: `hina migrate` up / `down all` / up, `hina doctor --json`, and `hina assets status`.
+7. Smoke: `hina migrate` up / `down all` / up, `hina doctor --json`, `hina assets status`, and `hina bench` (the live-voice turn-detection suite — non-interactive, no models).
 
 ## Project invariants (do not break these)
 
