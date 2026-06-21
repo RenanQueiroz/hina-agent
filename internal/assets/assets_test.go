@@ -7,11 +7,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func sha(b []byte) string {
@@ -105,6 +108,213 @@ func TestInstallDirectDownload(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, bad.Dest)); !os.IsNotExist(err) {
 		t.Fatal("failed install must not leave a file at dest")
 	}
+}
+
+func TestInstallRetriesTransientFailure(t *testing.T) {
+	// Shrink the backoff so the test is fast.
+	defer swapRetryDelay(time.Millisecond)()
+
+	content := bytes.Repeat([]byte("xyz"), 100)
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Fail the first three attempts with the transient responses a flaky CDN/proxy
+		// returns — a 503, a 408 Request Timeout, then a reset mid-body — and only then
+		// serve the real content. All three must be RETRIED, not treated as fatal.
+		switch atomic.AddInt32(&hits, 1) {
+		case 1:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case 2:
+			w.WriteHeader(http.StatusRequestTimeout) // 408 — a transient 4xx
+		case 3:
+			w.Header().Set("Content-Length", "100000")
+			w.WriteHeader(http.StatusOK)
+			w.Write(content[:10]) // short body -> size mismatch / copy error
+		default:
+			w.Write(content)
+		}
+	}))
+	defer srv.Close()
+
+	root := t.TempDir()
+	a := Asset{Name: "model", URL: srv.URL, SHA256: sha(content), Size: int64(len(content)), Dest: filepath.Join("supertonic", "onnx", "m.onnx"), Archive: ArchiveNone}
+	if err := install(context.Background(), root, a, nil); err != nil {
+		t.Fatalf("install should retry past transient failures: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got < 4 {
+		t.Fatalf("expected >= 4 attempts (503 + 408 + short body + success), got %d", got)
+	}
+	got, err := os.ReadFile(filepath.Join(root, a.Dest))
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("installed content mismatch after retry (err=%v)", err)
+	}
+}
+
+func TestInstallRetries421Misdirected(t *testing.T) {
+	defer swapRetryDelay(time.Millisecond)()
+
+	content := bytes.Repeat([]byte("q"), 64)
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// 421 is an HTTP/2 connection-coalescing miss — transient, recovered by a
+		// fresh-connection retry, NOT a permanent 4xx.
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.WriteHeader(http.StatusMisdirectedRequest)
+			return
+		}
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	root := t.TempDir()
+	a := Asset{Name: "model", URL: srv.URL, SHA256: sha(content), Size: int64(len(content)), Dest: filepath.Join("supertonic", "onnx", "m.onnx"), Archive: ArchiveNone}
+	if err := install(context.Background(), root, a, nil); err != nil {
+		t.Fatalf("install should retry a 421 Misdirected Request: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("expected exactly 2 attempts (421 then success), got %d", got)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	if d := parseRetryAfter("5"); d != 5*time.Second {
+		t.Fatalf("delta-seconds: got %v, want 5s", d)
+	}
+	if d := parseRetryAfter(""); d != 0 {
+		t.Fatalf("empty: got %v, want 0", d)
+	}
+	if d := parseRetryAfter("garbage"); d != 0 {
+		t.Fatalf("garbage: got %v, want 0", d)
+	}
+	if d := parseRetryAfter("-3"); d != 0 {
+		t.Fatalf("negative: got %v, want 0", d)
+	}
+	// An HTTP-date in the near future yields a positive, bounded delay.
+	future := time.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat)
+	if d := parseRetryAfter(future); d <= 0 || d > 31*time.Second {
+		t.Fatalf("http-date: got %v, want ~30s", d)
+	}
+	// A past HTTP-date yields 0 (don't wait).
+	past := time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)
+	if d := parseRetryAfter(past); d != 0 {
+		t.Fatalf("past date: got %v, want 0", d)
+	}
+}
+
+func TestInstallHonorsRetryAfter(t *testing.T) {
+	// Default backoff is ~0 (1ms), so any wait of ~1s proves the server's Retry-After
+	// header was honored over the default schedule.
+	defer swapRetryDelay(time.Millisecond)()
+
+	content := bytes.Repeat([]byte("r"), 32)
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.Header().Set("Retry-After", "1") // the server asks for 1s
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	root := t.TempDir()
+	a := Asset{Name: "model", URL: srv.URL, SHA256: sha(content), Size: int64(len(content)), Dest: filepath.Join("supertonic", "onnx", "m.onnx"), Archive: ArchiveNone}
+	start := time.Now()
+	if err := install(context.Background(), root, a, nil); err != nil {
+		t.Fatalf("install should retry a 429: %v", err)
+	}
+	if d := time.Since(start); d < 900*time.Millisecond {
+		t.Fatalf("install should have honored Retry-After: 1 (waited %v, want >= ~1s)", d)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("expected exactly 2 attempts (429 then success), got %d", got)
+	}
+}
+
+func TestInstallDoesNotRetryPermanent(t *testing.T) {
+	defer swapRetryDelay(time.Millisecond)()
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusNotFound) // a 4xx — retrying won't help
+	}))
+	defer srv.Close()
+
+	root := t.TempDir()
+	a := Asset{Name: "model", URL: srv.URL, SHA256: sha([]byte("x")), Size: 1, Dest: filepath.Join("supertonic", "onnx", "m.onnx"), Archive: ArchiveNone}
+	if err := install(context.Background(), root, a, nil); err == nil {
+		t.Fatal("a 404 must fail")
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("a permanent 404 must NOT be retried, got %d hits", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, a.Dest)); !os.IsNotExist(err) {
+		t.Fatal("a failed install must not leave a file at dest")
+	}
+}
+
+// TestDownloadClientHasBoundedDial guards against silently dropping the default
+// dialer: a custom transport with a nil DialContext has NO TCP connect timeout, so
+// a blackholed CDN IP would burn the whole client timeout per attempt and defeat the
+// retry. The client must keep a bounded dial + an overall timeout.
+func TestDownloadClientHasBoundedDial(t *testing.T) {
+	tr, ok := downloadClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("downloadClient.Transport is %T, want *http.Transport", downloadClient.Transport)
+	}
+	if tr.DialContext == nil {
+		t.Fatal("transport must set DialContext — a nil dialer has no TCP connect timeout")
+	}
+	if tr.TLSHandshakeTimeout == 0 {
+		t.Fatal("transport should bound the TLS handshake")
+	}
+	if downloadClient.Timeout == 0 {
+		t.Fatal("downloadClient should have an overall timeout")
+	}
+}
+
+// failingWriter simulates a local destination failure (disk full / I/O error) on
+// the first write.
+type failingWriter struct{ writes int }
+
+func (f *failingWriter) Write(b []byte) (int, error) {
+	f.writes++
+	return 0, errors.New("simulated disk-full write error")
+}
+
+// TestDownloadLocalWriteErrorIsPermanent: a temp-file write failure (disk full) must
+// be classified PERMANENT — not retried as a network transient — so install doesn't
+// re-download a 600MB model repeatedly against a full disk. download() makes exactly
+// one HTTP request; the local write error is wrapped as *permanentError, which
+// withRetry stops on after a single attempt (see TestInstallDoesNotRetryPermanent).
+func TestDownloadLocalWriteErrorIsPermanent(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Write(bytes.Repeat([]byte("z"), 4096))
+	}))
+	defer srv.Close()
+
+	fw := &failingWriter{}
+	_, _, err := download(context.Background(), srv.URL, fw)
+	if err == nil {
+		t.Fatal("a local write failure must surface an error")
+	}
+	var perm *permanentError
+	if !errors.As(err, &perm) {
+		t.Fatalf("a local write failure must be permanent (no retry), got %T: %v", err, err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("download must make exactly one request, got %d", got)
+	}
+}
+
+// swapRetryDelay shrinks the retry backoff for a test and returns a restore func.
+func swapRetryDelay(d time.Duration) func() {
+	old := retryBaseDelay
+	retryBaseDelay = d
+	return func() { retryBaseDelay = old }
 }
 
 func TestInstallTarGzExtract(t *testing.T) {

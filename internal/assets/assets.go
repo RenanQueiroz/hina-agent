@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -332,8 +333,10 @@ func verifyAsset(root string, a Asset) AssetStatus {
 
 // Pull downloads and installs every missing or mismatched asset for the platform
 // into root, verifying each artifact's SHA256 before installing. Already-valid
-// assets are skipped. It returns an error if the platform has no ORT build, or on
-// the first download/verify/extract failure.
+// assets are skipped, so re-running Pull after a failure RESUMES (only the missing
+// files are fetched). Each download retries transient network failures with backoff
+// (see withRetry). It returns an error if the platform has no ORT build, or on the
+// first asset that still fails to download (after retries), verify, or extract.
 func Pull(ctx context.Context, root, goos, goarch string, log *slog.Logger) error {
 	if log == nil {
 		log = slog.Default()
@@ -382,16 +385,35 @@ func install(ctx context.Context, root string, a Asset, log *slog.Logger) error 
 	defer os.Remove(tmpName) // no-op once renamed away
 
 	log.Info("downloading", "name", a.Name, "url", a.URL, "size", a.Size)
-	sum, n, err := download(ctx, a.URL, tmp)
+	// Download with retry/backoff: a flaky link (a TLS handshake timeout, a reset,
+	// a 5xx/429) re-attempts from a freshly-truncated temp file rather than aborting
+	// the whole multi-GB pull on a single blip. A 4xx or a cancelled context stops
+	// immediately; a full-size body whose checksum is wrong is an integrity failure,
+	// surfaced below WITHOUT retry (re-downloading won't fix a pinned-digest mismatch).
+	var sum string
+	dlErr := withRetry(ctx, log, a.Name, func() error {
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			return &permanentError{err}
+		}
+		if err := tmp.Truncate(0); err != nil {
+			return &permanentError{err}
+		}
+		s, n, err := download(ctx, a.URL, tmp)
+		if err != nil {
+			return err
+		}
+		if a.Size > 0 && n != a.Size {
+			return fmt.Errorf("downloaded %d bytes, want %d", n, a.Size) // partial body — retry
+		}
+		sum = s
+		return nil
+	})
 	cerr := tmp.Close()
-	if err != nil {
-		return err
+	if dlErr != nil {
+		return dlErr
 	}
 	if cerr != nil {
 		return cerr
-	}
-	if a.Size > 0 && n != a.Size {
-		return fmt.Errorf("downloaded %d bytes, want %d", n, a.Size)
 	}
 	if !strings.EqualFold(sum, a.SHA256) {
 		return fmt.Errorf("checksum mismatch: got %s want %s", sum, a.SHA256)
@@ -421,25 +443,191 @@ func install(ctx context.Context, root string, a Asset, log *slog.Logger) error 
 	return nil
 }
 
+// downloadClient is the shared downloader, tuned for large model downloads over
+// real-world links.
+var downloadClient = newDownloadClient()
+
+// newDownloadClient CLONES http.DefaultTransport — preserving its 30s TCP dial
+// timeout + keep-alive, the environment proxy, and HTTP/2 — and only TIGHTENS the
+// TLS-handshake and response-header timeouts, so a slow or wedged CDN surfaces as a
+// (retryable) error promptly. Cloning (rather than a bare &http.Transport{}) is
+// deliberate: a literal transport leaves DialContext nil, which means a zero dialer
+// with NO connect timeout, so a blackholed CDN IP would burn the whole 30m client
+// timeout per attempt and defeat the retry. The 30m client Timeout bounds the whole
+// exchange (a stalled body read fails and is retried from a clean temp file).
+func newDownloadClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSHandshakeTimeout = 30 * time.Second
+	tr.ResponseHeaderTimeout = 60 * time.Second
+	return &http.Client{Timeout: 30 * time.Minute, Transport: tr}
+}
+
+// permanentError marks a download failure that retrying won't fix (a 4xx, a
+// malformed request, a local temp-file error). withRetry surfaces it immediately
+// instead of backing off and re-attempting.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+// permanentWriter records a Write error from the wrapped (destination) writer so a
+// LOCAL failure (disk full / I/O error) can be classified as permanent — distinct
+// from a retryable network read failure, which io.Copy would otherwise surface the
+// same way (it returns the first error from either the read or the write side).
+type permanentWriter struct {
+	w    io.Writer
+	werr error
+}
+
+func (p *permanentWriter) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	if err != nil {
+		p.werr = err
+	}
+	return n, err
+}
+
+// retryAfterError is a retryable HTTP failure (429 Too Many Requests / 503 Service
+// Unavailable) that carries the server's requested delay, parsed from the
+// Retry-After header (0 if absent/unparseable). withRetry waits at least that long
+// (bounded by retryAfterMax) instead of its default backoff, so a real throttle with
+// "Retry-After: 60" isn't burned through in ~15s of fixed backoff.
+type retryAfterError struct {
+	err   error
+	after time.Duration
+}
+
+func (e *retryAfterError) Error() string { return e.err.Error() }
+func (e *retryAfterError) Unwrap() error { return e.err }
+
+// parseRetryAfter parses a Retry-After header value — either delta-seconds
+// ("120") or an HTTP-date — into a delay. Returns 0 when absent, malformed, or in
+// the past (the caller falls back to its default backoff).
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// Retry schedule for transient download failures. These are vars (not consts) so
+// tests can shrink the backoff; production backs off exponentially 1s,2s,4s,8s
+// (capped at retryMaxDelay), or honors a server Retry-After up to retryAfterMax.
+var (
+	retryAttempts  = 5
+	retryBaseDelay = 1 * time.Second
+	retryMaxDelay  = 30 * time.Second
+	retryAfterMax  = 2 * time.Minute
+)
+
+// withRetry runs attempt up to retryAttempts times, backing off exponentially on a
+// TRANSIENT error (a network blip, a 5xx/429, a short read). A permanentError or a
+// cancelled context stops immediately. The attempt itself is responsible for
+// resetting any partial state (the temp file) at the start of each try.
+func withRetry(ctx context.Context, log *slog.Logger, name string, attempt func() error) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	var err error
+	for i := 0; i < retryAttempts; i++ {
+		if err = attempt(); err == nil {
+			return nil
+		}
+		var perm *permanentError
+		if errors.As(err, &perm) || ctx.Err() != nil {
+			return err
+		}
+		if i == retryAttempts-1 {
+			break
+		}
+		// Drop pooled connections so the retry dials FRESH. This recovers a 421
+		// Misdirected Request (HTTP/2 coalescing sent us to the wrong backend) and a
+		// half-broken kept-alive connection, where reusing the same connection would
+		// just fail again. We download serially, so at most one idle conn is dropped.
+		downloadClient.CloseIdleConnections()
+		delay := retryBaseDelay << i
+		if delay > retryMaxDelay {
+			delay = retryMaxDelay
+		}
+		// Honor a server-provided Retry-After (a 429/503 throttle) over the default
+		// backoff, bounded so a hostile/huge value can't wedge the pull.
+		var ra *retryAfterError
+		if errors.As(err, &ra) && ra.after > 0 {
+			delay = ra.after
+			if delay > retryAfterMax {
+				delay = retryAfterMax
+			}
+		}
+		log.Warn("download failed; retrying", "name", name, "attempt", i+1, "of", retryAttempts, "err", err, "retry_in", delay)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return fmt.Errorf("after %d attempts: %w", retryAttempts, err)
+}
+
 // download streams url into w, returning the artifact's hex SHA256 and byte count.
+// A transport error (TLS handshake timeout, connection reset) or a 5xx/429 is
+// returned as-is so the caller retries it; a 4xx is wrapped as a permanentError
+// (a bad URL / auth failure won't fix on retry).
 func download(ctx context.Context, url string, w io.Writer) (string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", 0, err
+		return "", 0, &permanentError{err}
 	}
-	client := &http.Client{Timeout: 30 * time.Minute}
-	resp, err := client.Do(req)
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		return "", 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("http %s", resp.Status)
+		herr := fmt.Errorf("http %s", resp.Status)
+		switch {
+		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable:
+			// Throttled / temporarily unavailable: retryable, and honor the server's
+			// Retry-After (delta-seconds or HTTP-date) when it tells us when to retry.
+			return "", 0, &retryAfterError{err: herr, after: parseRetryAfter(resp.Header.Get("Retry-After"))}
+		case resp.StatusCode >= 400 && resp.StatusCode < 500 &&
+			resp.StatusCode != http.StatusRequestTimeout &&
+			resp.StatusCode != http.StatusMisdirectedRequest:
+			// Other 4xx is permanent: a bad URL/auth won't fix on retry. (408 Request
+			// Timeout and 421 Misdirected Request fall through as transient — a 421 is an
+			// HTTP/2 coalescing miss recovered by retrying on a fresh connection.)
+			return "", 0, &permanentError{herr}
+		default:
+			// Other 5xx, plus the transient 408/421: retryable with the default backoff.
+			return "", 0, herr
+		}
 	}
+	// Wrap the destination so a LOCAL write failure (disk full, I/O error) is told
+	// apart from a network read failure: io.Copy surfaces the first error from either
+	// side, but only a body-read failure is worth retrying — re-downloading a 600MB
+	// model can't repair a full disk, so a write error is permanent.
+	pw := &permanentWriter{w: w}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(w, h), resp.Body)
+	n, err := io.Copy(io.MultiWriter(pw, h), resp.Body)
 	if err != nil {
-		return "", 0, err
+		if pw.werr != nil {
+			return "", 0, &permanentError{pw.werr}
+		}
+		if errors.Is(err, io.ErrShortWrite) {
+			return "", 0, &permanentError{err}
+		}
+		return "", 0, err // a body-read (network) failure — retryable
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
