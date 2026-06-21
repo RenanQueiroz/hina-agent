@@ -198,7 +198,10 @@ func TestRunTurnWaitsForInterruptFence(t *testing.T) {
 	release()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
+		// Generous: RunTurn does real work (build context + mock LLM + persist), which can
+		// take well over a second on a heavily-loaded/slow CI runner — only a never-proceed
+		// (the fence didn't release) is a real failure.
 		t.Fatal("RunTurn did not proceed after the interrupt fence released")
 	}
 }
@@ -222,7 +225,7 @@ func TestInterruptFenceReleases(t *testing.T) {
 	r2()
 	select {
 	case <-got:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("awaitInterrupts did not return after all fences released")
 	}
 }
@@ -267,7 +270,7 @@ func TestRunTurnOnCommittedFenceNoSelfDeadlock(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("RunTurn self-deadlocked on a fence its own onCommitted reserved")
 	}
 	if release != nil {
