@@ -3,10 +3,18 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/RenanQueiroz/hina-agent/internal/llm"
 )
+
+// maxToolRounds caps how many tool-call rounds one turn may run before the loop
+// stops, so a misbehaving model that keeps requesting tools can't spin forever.
+const maxToolRounds = 8
+
+// ErrToolRoundLimit is returned when a turn exceeds maxToolRounds.
+var ErrToolRoundLimit = errors.New("agent: tool-call round limit reached")
 
 // Loop runs a single agent turn: it streams assistant text from the LLM provider,
 // accumulates the reply, and (once providers surface them) routes tool calls to
@@ -67,35 +75,85 @@ func NewLoop(provider llm.Provider, tools ToolHook) *Loop {
 // its interrupted/errored classification. The caller owns persistence: Run never
 // touches the store, so the durable-turn semantics stay with each mode's commit.
 func (l *Loop) Run(ctx context.Context, msgs []llm.Message, onDelta func(string)) Result {
-	var sb strings.Builder
-	var streamErr error
+	var full strings.Builder
+	// work is the running context: the caller's messages, extended each round with
+	// the assistant's text and the tool results so the model sees them next round.
+	work := append([]llm.Message(nil), msgs...)
 
+	for round := 0; ; round++ {
+		text, calls, streamErr := l.stream(ctx, work, onDelta)
+		full.WriteString(text)
+
+		// A client abort / barge-in can surface as either a stream error or a context
+		// cancellation; either way it's an interrupt, not a backend failure — so the
+		// partial reply is preserved and committed as interrupted, never errored.
+		if ctx.Err() != nil {
+			return Result{Text: full.String(), Interrupted: true}
+		}
+		if streamErr != nil {
+			return Result{Text: full.String(), Err: streamErr}
+		}
+		// No tool calls (or no hook to run them) — this is the final assistant reply.
+		if len(calls) == 0 || l.tools == nil {
+			return Result{Text: full.String()}
+		}
+		if round >= maxToolRounds {
+			return Result{Text: full.String(), Err: ErrToolRoundLimit}
+		}
+
+		// Execute each requested tool through the hook (per-user approval + sandbox)
+		// and feed the results back as RoleTool messages for the next round.
+		if text != "" {
+			work = append(work, llm.Message{Role: llm.RoleAssistant, Content: text})
+		}
+		for _, c := range calls {
+			result, err := l.tools(ctx, ToolCall{ID: c.ID, Name: c.Name, Arguments: json.RawMessage(c.Arguments)})
+			if ctx.Err() != nil {
+				return Result{Text: full.String(), Interrupted: true}
+			}
+			work = append(work, llm.Message{Role: llm.RoleTool, Content: toolResultContent(c.Name, result, err)})
+		}
+	}
+}
+
+// stream consumes one provider Stream, returning the accumulated text, any tool
+// calls the provider requested, and a backend/stream error. onDelta (optional) is
+// invoked for each text delta.
+func (l *Loop) stream(ctx context.Context, msgs []llm.Message, onDelta func(string)) (string, []llm.ToolCall, error) {
 	stream, err := l.provider.Stream(ctx, llm.Request{Messages: msgs})
 	if err != nil {
-		streamErr = err
-	} else {
-		for d := range stream {
-			if d.Err != nil {
-				streamErr = d.Err
-				break
-			}
-			if d.Done {
-				break
-			}
+		return "", nil, err
+	}
+	var sb strings.Builder
+	var calls []llm.ToolCall
+	for d := range stream {
+		if d.Err != nil {
+			return sb.String(), calls, d.Err
+		}
+		if d.Done {
+			break
+		}
+		if len(d.ToolCalls) > 0 {
+			calls = append(calls, d.ToolCalls...)
+		}
+		if d.Text != "" {
 			sb.WriteString(d.Text)
 			if onDelta != nil {
 				onDelta(d.Text)
 			}
 		}
 	}
+	return sb.String(), calls, nil
+}
 
-	// A client abort / barge-in can surface as either a stream error or a context
-	// cancellation; either way it's an interrupt, not a backend failure — so the
-	// partial reply is preserved and committed as interrupted, never errored.
-	interrupted := ctx.Err() != nil
-	res := Result{Text: sb.String(), Interrupted: interrupted}
-	if streamErr != nil && !interrupted {
-		res.Err = streamErr
+// toolResultContent renders a tool result (or an execution error) as the content
+// of the RoleTool message fed back to the model.
+func toolResultContent(name string, result ToolResult, err error) string {
+	if err != nil {
+		return "tool " + name + " failed: " + err.Error()
 	}
-	return res
+	if result.Err != "" {
+		return "tool " + name + " error: " + result.Err
+	}
+	return result.Content
 }

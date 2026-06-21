@@ -73,7 +73,7 @@ The user wants Windows supported from the start but not blocking. Concretely, ac
 
 - **Usable product:** end of Phase 2 (text chat, multi-user, sessions).
 - **Local voice MVP:** end of Phase 6 (speak to Hina, barge-in, on Linux/macOS; Windows local voice gated to Phase 12).
-- **Sandboxed tools + automations:** end of Phase 9.
+- **Sandboxed tools in chat + secret vault:** end of Phase 7 (a model tool call runs in the user's `sbx` sandbox with policy + approval + audit; per-user encrypted secrets). **Full Automations:** end of Phase 9.
 - **Both transport modes:** end of Phase 10.
 - **Account-free local LLM:** end of Phase 11 (managed `llama-server` drives local text + voice with no cloud account; Windows validated in Phase 12).
 - **Windows GA:** end of Phase 12.

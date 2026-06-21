@@ -153,7 +153,7 @@ func cmdSetup(args []string) error {
 	if _, err := a.store.Migrate(ctx); err != nil {
 		return err
 	}
-	if _, err := platform.LoadOrCreateMasterKey(a.paths.MasterKeyPath()); err != nil {
+	if err := ensureMasterKey(a); err != nil {
 		return err
 	}
 	if err := writeDefaultConfigIfMissing(a.paths.ConfigFilePath()); err != nil {
@@ -277,6 +277,31 @@ enabled = false
 # min_speech_ms = 250   # discard speech shorter than this (false-start rejection)
 # max_duration_s = 30   # force-commit a turn after this long
 # idle_ttl = "5m"       # unload the VAD model after this idle period
+
+[sandbox]
+# Docker 'sbx' runner that backs tool execution (Phase 7): shell/file/HTTP tool
+# calls run inside the calling user's sandbox with explicit grants, resource
+# limits, an approval gate, and an audit log — never on the host. The network
+# allow-list is enforced at request time for network-explicit tools (http_fetch);
+# a raw shell command's egress is bounded only by the operator's 'sbx' container
+# policy (run sbx in a default-deny / Balanced/Locked-Down mode). Off by default;
+# needs a pinned 'sbx' install (see 'hina doctor'). When enabled but 'sbx' is
+# absent the server still runs and tool calls report it unavailable.
+enabled = false
+# sbx_path = ""          # override the sbx binary path (default: PATH lookup)
+# kit = ""               # admin-controlled sbx kit/template
+approval = "always"      # always (prompt per tool call) | auto (run without prompting; still audited)
+# cpus = "2"             # default per-run CPU limit
+# memory = "2g"          # default per-run memory limit
+# pids = 512             # default per-run process limit (0 = omit)
+# timeout = "5m"         # default per-run wall-clock cap
+# workspace_quota_mb = 2048  # per-user durable workspace quota (0 = unlimited)
+# scratch_ttl = "1h"     # reap ephemeral run scratch older than this
+# approval_timeout = "5m"  # deny a tool call left undecided this long
+# allow_version_mismatch = false  # run tools even if the installed sbx minor != the pinned version (after verifying the smoke test)
+# network_isolated = false  # set true ONLY after locking down sbx's container egress
+#   (Balanced/Locked-Down). Hina can't gate a raw shell command's network, so granted
+#   secrets are injected into runs ONLY when this is true — fail closed by default.
 
 # [paths]  # optional overrides of the OS-resolved app directories
 # data_dir = "/var/lib/hina"

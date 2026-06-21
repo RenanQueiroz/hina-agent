@@ -2,12 +2,15 @@
 import type {
   AdminLLMInfo,
   AdminRuntime,
+  AdminSandbox,
   AdminUser,
   ConfigInfo,
   Conversation,
   LoginResponse,
   PostMessageResponse,
   RTCStats,
+  SandboxEnvironment,
+  Secret,
   Turn,
   User,
 } from "./api.gen";
@@ -84,6 +87,36 @@ export const api = {
   adminLLM: () => req<AdminLLMInfo>("/api/v1/admin/llm"),
   adminRTC: () => req<RTCStats>("/api/v1/admin/rtc"),
   adminRuntime: () => req<AdminRuntime>("/api/v1/admin/runtime"),
+  adminSandbox: () => req<AdminSandbox>("/api/v1/admin/sandbox"),
+
+  // Sandbox Environment policy (per user).
+  getSandboxEnvironment: () =>
+    req<SandboxEnvironment>("/api/v1/sandbox/environment"),
+  updateSandboxEnvironment: (env: SandboxEnvironment) =>
+    req<SandboxEnvironment>("/api/v1/sandbox/environment", {
+      method: "PUT",
+      body: JSON.stringify(env),
+    }),
+
+  // Secret vault (per user). Values are write-only — the API never returns them.
+  listSecrets: (): Promise<Secret[]> =>
+    req<{ secrets: Secret[] }>("/api/v1/sandbox/secrets").then(
+      (r) => r.secrets ?? [],
+    ),
+  createSecret: (name: string, value: string, description = "") =>
+    req<Secret>("/api/v1/sandbox/secrets", {
+      method: "POST",
+      body: JSON.stringify({ name, value, description }),
+    }),
+  deleteSecret: (id: string) =>
+    req<void>(`/api/v1/sandbox/secrets/${id}`, { method: "DELETE" }),
+
+  // Approve or deny a pending tool call raised in a conversation.
+  decideToolApproval: (conversationId: string, callId: string, approve: boolean) =>
+    req<{ ok: boolean }>(
+      `/api/v1/conversations/${conversationId}/tool-approvals/${callId}`,
+      { method: "POST", body: JSON.stringify({ approve }) },
+    ),
 
   // Speak text into the caller's active live session (server-driven TTS).
   speak: (text: string, voice?: string, lang?: string) =>

@@ -10,6 +10,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/agent"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/id"
+	"github.com/RenanQueiroz/hina-agent/internal/sandbox"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
 )
 
@@ -98,10 +99,12 @@ func (s *Server) RunTurn(ctx context.Context, convID, userID, transcript string,
 	}
 	msgs := agent.BuildContext(s.cfg.LLM.SystemPrompt, turns)
 
-	// 3. Stream the assistant reply through the shared agent loop.
+	// 3. Stream the assistant reply through the shared agent loop, scoping any tool
+	//    call to this user + conversation (Phase 7), exactly as the text path does.
 	asTurnID := id.New("trn")
 	s.publish(ctx, events.SourceServer, events.TypeTurnStarted, convID, userID, asTurnID, nil)
-	res := s.loop.Run(ctx, msgs, onDelta)
+	turnCtx := withToolScope(ctx, sandbox.Scope{UserID: userID, ConversationID: convID})
+	res := s.loop.Run(turnCtx, msgs, onDelta)
 	text := res.Text
 
 	// 4. Finalize durably (non-cancelled context), classifying error vs interrupt

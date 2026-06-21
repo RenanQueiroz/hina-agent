@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/RenanQueiroz/hina-agent/internal/config"
 	"github.com/RenanQueiroz/hina-agent/internal/logbuf"
@@ -50,6 +51,20 @@ func (a *app) close() {
 	if a != nil && a.store != nil {
 		_ = a.store.Close()
 	}
+}
+
+// ensureMasterKey creates (or loads) the secret-vault master key, EXCEPT on
+// Windows, where owner-only ACL/DPAPI protection is a Phase 12 no-op: creating an
+// unprotected key there would let a local user read it, and the vault is gated off
+// on Windows anyway, so we don't materialize the key until Phase 12 secures it.
+func ensureMasterKey(a *app) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if _, err := platform.LoadOrCreateMasterKey(a.paths.MasterKeyPath()); err != nil {
+		return err
+	}
+	return nil
 }
 
 // applyPathOverrides applies optional [paths] config over the resolved dirs.

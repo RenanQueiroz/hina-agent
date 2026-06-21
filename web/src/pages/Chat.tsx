@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Plus, Send, Square } from "lucide-react";
+import { Check, Copy, Plus, Send, Square, X } from "lucide-react";
 import { api } from "../lib/api";
 import { useConversationEvents } from "../lib/useEvents";
 import type { Event as ServerEvent } from "../lib/events.gen";
 import { reduceEvent, type Msg } from "../lib/chatReducer";
-import { Button, Spinner } from "../components/ui";
+import { reduceApproval, type PendingApproval } from "../lib/sandbox";
+import { Button, Card, Spinner } from "../components/ui";
 
 export function ChatPage() {
   const qc = useQueryClient();
   const conversations = useQuery({ queryKey: ["conversations"], queryFn: api.listConversations });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [input, setInput] = useState("");
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -29,6 +31,7 @@ export function ChatPage() {
   // navigates away (Phase 2 navigate-away cancellation requirement).
   useEffect(() => {
     setMessages([]);
+    setApprovals([]);
     return () => {
       abortRef.current?.abort();
       abortRef.current = null;
@@ -37,7 +40,17 @@ export function ChatPage() {
 
   const onEvent = useCallback((e: ServerEvent) => {
     setMessages((prev) => reduceEvent(prev, e));
+    setApprovals((prev) => reduceApproval(prev, e));
   }, []);
+
+  const decideApproval = useCallback(
+    (callId: string, approve: boolean) => {
+      // Optimistically drop the card; ToolCallCompleted also clears it.
+      setApprovals((prev) => prev.filter((a) => a.callId !== callId));
+      if (selectedId) api.decideToolApproval(selectedId, callId, approve).catch(() => {});
+    },
+    [selectedId],
+  );
   const onDisconnect = useCallback(() => {
     // Stop pulsing any in-progress draft on disconnect. If the turn is healthy,
     // its terminal event re-arrives on reconnect and re-renders it; if its
@@ -148,6 +161,26 @@ export function ChatPage() {
                 <div ref={bottomRef} />
               </div>
             </div>
+            {approvals.length > 0 && (
+              <div className="mx-auto w-full max-w-3xl space-y-2 px-4 pb-2">
+                {approvals.map((a) => (
+                  <Card key={a.callId} className="flex items-center gap-3 p-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium">
+                        Allow tool <span className="font-mono">{a.tool}</span>?
+                      </p>
+                      <p className="truncate font-mono text-xs text-zinc-500">{a.summary}</p>
+                    </div>
+                    <Button onClick={() => decideApproval(a.callId, true)}>
+                      <Check size={16} /> Approve
+                    </Button>
+                    <Button variant="danger" onClick={() => decideApproval(a.callId, false)}>
+                      <X size={16} /> Deny
+                    </Button>
+                  </Card>
+                ))}
+              </div>
+            )}
             <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
               <div className="mx-auto flex max-w-3xl items-end gap-2">
                 <textarea

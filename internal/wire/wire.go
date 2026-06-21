@@ -179,6 +179,98 @@ type AdminUserList struct {
 	Users []AdminUser `json:"users"`
 }
 
+// --- Phase 7: sandbox + secret vault ---
+
+// SandboxEnvironment is a user's Sandbox Environment policy (GET/PUT
+// /sandbox/environment). AvailableTools is server-supplied (the built-in tool
+// set) so the UI can offer the full list; AllowedTools is the user's selection.
+type SandboxEnvironment struct {
+	AllowedTools   []string             `json:"allowed_tools"`
+	AvailableTools []string             `json:"available_tools"`
+	MCPServers     []SandboxMCPServer   `json:"mcp_servers"`
+	Network        SandboxNetworkPolicy `json:"network"`
+	WritableMounts []string             `json:"writable_mounts"`
+	SecretGrants   []SandboxSecretGrant `json:"secret_grants"`
+}
+
+// SandboxMCPServer is a configured MCP server (name + url).
+type SandboxMCPServer struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// SandboxNetworkPolicy is the default posture plus the host:port allow-list.
+type SandboxNetworkPolicy struct {
+	Default string               `json:"default"` // deny | allow
+	Allow   []SandboxNetworkRule `json:"allow"`
+}
+
+// SandboxNetworkRule is one host:port allow-list entry.
+type SandboxNetworkRule struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+// SandboxSecretGrant binds a vaulted secret to its injected env-var name.
+type SandboxSecretGrant struct {
+	SecretID string `json:"secret_id"`
+	EnvName  string `json:"env_name"`
+}
+
+// Secret is the non-sensitive metadata for a vaulted secret (never the value).
+type Secret struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// SecretList is the GET /sandbox/secrets response.
+type SecretList struct {
+	Secrets []Secret `json:"secrets"`
+}
+
+// AdminSandbox is the GET /admin/sandbox response: runtime status + usage.
+type AdminSandbox struct {
+	Runtime SandboxRuntime     `json:"runtime"`
+	Users   []SandboxUserUsage `json:"users"`
+	Runs    []SandboxRunInfo   `json:"runs"`
+}
+
+// SandboxRuntime is the sbx runner status for the admin view.
+type SandboxRuntime struct {
+	Enabled   bool   `json:"enabled"`
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+	Pinned    string `json:"pinned"`
+	Path      string `json:"path,omitempty"`
+	Approval  string `json:"approval"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// SandboxUserUsage is one user's sandbox storage + run footprint.
+type SandboxUserUsage struct {
+	UserID         string `json:"user_id"`
+	Username       string `json:"username"`
+	WorkspaceBytes int64  `json:"workspace_bytes"`
+	RunCount       int    `json:"run_count"`
+}
+
+// SandboxRunInfo is one audit-log row (no secret values; command is redacted).
+type SandboxRunInfo struct {
+	ID             string    `json:"id"`
+	UserID         string    `json:"user_id"`
+	ConversationID string    `json:"conversation_id"`
+	Tool           string    `json:"tool"`
+	Decision       string    `json:"decision"`
+	ExitCode       int       `json:"exit_code"`
+	DurationMs     int64     `json:"duration_ms"`
+	Command        string    `json:"command"`
+	Error          string    `json:"error"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 // ErrorResponse is the shape of all error bodies.
 type ErrorResponse struct {
 	Error string `json:"error"`

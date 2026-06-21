@@ -13,6 +13,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/id"
+	"github.com/RenanQueiroz/hina-agent/internal/sandbox"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
 	"github.com/RenanQueiroz/hina-agent/internal/wire"
 )
@@ -152,7 +153,10 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// below (Result.Err) so cancellation vs backend-error is classified by
 	// interrupted, and the durable turn+events stay atomic — never an event-only
 	// ErrorEvent for a turn that has no durable assistant turn.
-	res := s.loop.Run(ctx, msgs, func(delta string) {
+	// Scope any model-requested tool call to this user + conversation so the shared
+	// loop's tool hook runs it in the right user's sandbox (Phase 7).
+	turnCtx := withToolScope(ctx, sandbox.Scope{UserID: u.ID, ConversationID: conv.ID})
+	res := s.loop.Run(turnCtx, msgs, func(delta string) {
 		s.publishEphemeral(events.SourceServer, events.TypeAgentTextDelta, conv.ID, u.ID, asTurnID,
 			map[string]string{"delta": delta})
 	})

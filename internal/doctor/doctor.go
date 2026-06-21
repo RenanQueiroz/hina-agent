@@ -13,6 +13,7 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/config"
 	"github.com/RenanQueiroz/hina-agent/internal/onnx"
 	"github.com/RenanQueiroz/hina-agent/internal/platform"
+	"github.com/RenanQueiroz/hina-agent/internal/sandbox"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
 )
 
@@ -59,8 +60,44 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 
 	// External runtimes (present-or-not; deeper validation in their phases).
 	r.addTool(ctx, "docker", "Phase 7 sandbox prerequisite", "docker", "--version")
-	r.addTool(ctx, "sbx", "Phase 7 sandbox runtime", "sbx", "--version")
 	r.addTool(ctx, "llama.cpp (llama-server)", "Phase 11 managed local LLM", "llama-server", "--version")
+
+	// Sandbox runner (Phase 7): report the pinned-vs-detected `sbx` version so an
+	// unvetted upgrade is visible, then the sandbox-tools feature availability.
+	runner := sandbox.NewCLIRunner(sandbox.Config{
+		Path:                 cfg.Sandbox.SbxPath,
+		AllowVersionMismatch: cfg.Sandbox.AllowVersionMismatch,
+	})
+	sb := runner.Status()
+	switch {
+	case !sb.Available:
+		detail := "sbx not installed — Phase 7 sandbox runtime"
+		if sb.Reason != "" {
+			detail = sb.Reason
+		}
+		r.add("sbx (sandbox runtime)", "missing", detail)
+	case sb.Reason != "":
+		// Available but the detected version differs from the pinned one (opted in).
+		r.add("sbx (sandbox runtime)", "warn", sb.Reason)
+	default:
+		r.add("sbx (sandbox runtime)", "ok", fmt.Sprintf("sbx %s (pinned %s) at %s", sb.Version, sb.Pinned, sb.Path))
+	}
+	switch {
+	case runtime.GOOS == "windows":
+		r.add("sandbox tools", "unavailable", "gated to Phase 12 on Windows (owner-only ACL/DPAPI not yet enforced)")
+	case !cfg.Sandbox.Enabled:
+		r.add("sandbox tools", "unavailable", "disabled: set [sandbox] enabled=true (needs a pinned sbx install)")
+	case !sb.Available:
+		r.add("sandbox tools", "unavailable", "sbx runtime not available — install/pin sbx")
+	default:
+		// Run the pinned command-line smoke test so an unvetted/drifted sbx surfaces
+		// here rather than at the first tool call.
+		if err := runner.Smoke(ctx); err != nil {
+			r.add("sandbox tools", "warn", "sbx command-line smoke test failed: "+firstLine(err.Error()))
+		} else {
+			r.add("sandbox tools", "ok", "shell/file/HTTP tool calls run inside per-user sbx sandboxes (smoke passed)")
+		}
+	}
 
 	// WebRTC voice bridge — pure Go (Pion), so always available with no native
 	// toolchain. Hands-on browser loopback is validated in Phase 12.

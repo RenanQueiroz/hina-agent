@@ -56,7 +56,9 @@ func TestMigrateUpDownRoundTrip(t *testing.T) {
 }
 
 // TestMigrateDownSteps proves a bounded rollback reverts only the requested
-// number of migrations (here: rolling back the single migration leaves none).
+// number of migrations: stepping down one at a time reverts exactly one each
+// time, and once every applied migration is rolled back nothing remains. Written
+// to survive new migrations being added (no hard-coded migration count).
 func TestMigrateDownSteps(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(filepath.Join(t.TempDir(), "m.db"))
@@ -64,15 +66,18 @@ func TestMigrateDownSteps(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if _, err := st.Migrate(ctx); err != nil {
-		t.Fatalf("migrate up: %v", err)
+	applied, err := st.Migrate(ctx)
+	if err != nil || applied < 1 {
+		t.Fatalf("migrate up = %d, err %v", applied, err)
 	}
-	reverted, err := st.MigrateDown(ctx, 1)
-	if err != nil || reverted != 1 {
-		t.Fatalf("migrate down 1 = %d, err %v", reverted, err)
+	for i := 0; i < applied; i++ {
+		reverted, err := st.MigrateDown(ctx, 1)
+		if err != nil || reverted != 1 {
+			t.Fatalf("migrate down 1 (step %d) = %d, err %v", i, reverted, err)
+		}
 	}
 	// Idempotent: nothing left to revert.
 	if again, err := st.MigrateDown(ctx, 1); err != nil || again != 0 {
-		t.Fatalf("second down = %d, err %v (want 0)", again, err)
+		t.Fatalf("down after full rollback = %d, err %v (want 0)", again, err)
 	}
 }

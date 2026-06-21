@@ -24,9 +24,11 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/llm"
 	"github.com/RenanQueiroz/hina-agent/internal/logbuf"
 	"github.com/RenanQueiroz/hina-agent/internal/rtc"
+	"github.com/RenanQueiroz/hina-agent/internal/sandbox"
 	"github.com/RenanQueiroz/hina-agent/internal/store"
 	"github.com/RenanQueiroz/hina-agent/internal/tts"
 	"github.com/RenanQueiroz/hina-agent/internal/vad"
+	"github.com/RenanQueiroz/hina-agent/internal/vault"
 	"github.com/RenanQueiroz/hina-agent/internal/wire"
 	webui "github.com/RenanQueiroz/hina-agent/web"
 )
@@ -48,6 +50,13 @@ type Server struct {
 	ready    atomic.Bool
 	handler  http.Handler
 
+	// Phase 7 sandbox + secret vault (installed via SetSandbox; nil until then).
+	vault      *vault.Vault
+	runner     sandbox.Runner
+	router     *sandbox.Router
+	workspaces *sandbox.WorkspaceManager
+	approvals  *approvalRegistry
+
 	turnMu      sync.Mutex      // guards activeTurns + pendingInterrupts
 	activeTurns map[string]bool // conversationID -> a turn is in flight
 	// pendingInterrupts is a per-conversation happens-before fence: an interrupt mark
@@ -60,9 +69,47 @@ type Server struct {
 
 // New builds the server and its handler.
 func New(cfg config.Config, st *store.Store, bus *events.Bus, am *auth.Manager, provider llm.Provider, logs *logbuf.Buffer, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, bus: bus, auth: am, provider: provider, loop: agent.NewLoop(provider, nil), logs: logs, log: log, activeTurns: make(map[string]bool), pendingInterrupts: make(map[string]int)}
+	s := &Server{cfg: cfg, store: st, bus: bus, auth: am, provider: provider, logs: logs, log: log, activeTurns: make(map[string]bool), pendingInterrupts: make(map[string]int)}
+	// The agent loop is built with the sandbox tool hook (Phase 7); the hook is a
+	// no-op until SetSandbox installs the router AND [sandbox] is enabled, so the
+	// default build behaves exactly as before (no provider emits tool calls yet).
+	s.loop = agent.NewLoop(provider, s.toolHook)
 	s.handler = s.withMiddleware(s.routes())
 	return s
+}
+
+// SetSandbox installs the Phase 7 secret vault + workspace manager + sbx runner
+// (post-construction, like SetTTS). The vault + workspaces power the per-user
+// secret/environment endpoints regardless of whether tool execution is enabled;
+// the tool Router + approval registry are built only when [sandbox] is enabled,
+// so a misconfigured/absent sbx never affects secret/env management. v/ws/runner
+// may be nil (those features then report unavailable).
+func (s *Server) SetSandbox(v *vault.Vault, ws *sandbox.WorkspaceManager, runner sandbox.Runner) {
+	s.vault = v
+	s.workspaces = ws
+	s.runner = runner
+	if !s.cfg.Sandbox.Enabled || runner == nil || ws == nil || v == nil {
+		return
+	}
+	s.approvals = newApprovalRegistry(s.cfg.Sandbox.ApprovalTimeoutOr(5 * time.Minute))
+	s.router = sandbox.NewRouter(sandbox.RouterConfig{
+		Runner:     runner,
+		Secrets:    v,
+		Workspaces: ws,
+		Store:      s.store,
+		Bus:        s.bus,
+		Approver:   s.approvals,
+		Approval:   s.cfg.Sandbox.ApprovalMode(),
+		Limits: sandbox.Limits{
+			CPUs:    s.cfg.Sandbox.CPUs,
+			Memory:  s.cfg.Sandbox.Memory,
+			PIDs:    s.cfg.Sandbox.PIDs,
+			Timeout: s.cfg.Sandbox.TimeoutOr(5 * time.Minute),
+		},
+		QuotaBytes:      s.cfg.Sandbox.WorkspaceQuotaBytes(),
+		NetworkIsolated: s.cfg.Sandbox.NetworkIsolated,
+		Log:             s.log,
+	})
 }
 
 // beginTurn marks a conversation as having an in-flight turn, returning false if
@@ -195,12 +242,24 @@ func (s *Server) routes() http.Handler {
 	// Speak text into the caller's active live session (server-driven TTS).
 	mux.Handle("POST /api/v1/realtime/speak", s.requireUser(s.handleRealtimeSpeak))
 
+	// Tool-call approval decisions (per conversation; owner only).
+	mux.Handle("POST /api/v1/conversations/{id}/tool-approvals/{callID}", s.requireUser(s.handleToolApproval))
+
+	// Sandbox Environment + secret vault (per user).
+	mux.Handle("GET /api/v1/sandbox/environment", s.requireUser(s.handleGetSandboxEnvironment))
+	mux.Handle("PUT /api/v1/sandbox/environment", s.requireUser(s.handlePutSandboxEnvironment))
+	mux.Handle("GET /api/v1/sandbox/secrets", s.requireUser(s.handleListSecrets))
+	mux.Handle("POST /api/v1/sandbox/secrets", s.requireUser(s.handleCreateSecret))
+	mux.Handle("PUT /api/v1/sandbox/secrets/{id}", s.requireUser(s.handleUpdateSecret))
+	mux.Handle("DELETE /api/v1/sandbox/secrets/{id}", s.requireUser(s.handleDeleteSecret))
+
 	// Admin routes.
 	mux.Handle("GET /api/v1/admin/users", s.requireAdmin(s.handleListUsers))
 	mux.Handle("GET /api/v1/admin/llm", s.requireAdmin(s.handleAdminLLM))
 	mux.Handle("GET /api/v1/admin/runtime", s.requireAdmin(s.handleAdminRuntime))
 	mux.Handle("GET /api/v1/admin/logs", s.requireAdmin(s.handleAdminLogs))
 	mux.Handle("GET /api/v1/admin/rtc", s.requireAdmin(s.handleAdminRTC))
+	mux.Handle("GET /api/v1/admin/sandbox", s.requireAdmin(s.handleAdminSandbox))
 
 	// SPA: the embedded web client serves all remaining paths (more specific
 	// /healthz, /readyz, /api/v1/* patterns take precedence).

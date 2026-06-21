@@ -21,8 +21,10 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/onnx"
 	"github.com/RenanQueiroz/hina-agent/internal/platform"
 	"github.com/RenanQueiroz/hina-agent/internal/rtc"
+	"github.com/RenanQueiroz/hina-agent/internal/sandbox"
 	"github.com/RenanQueiroz/hina-agent/internal/tts"
 	"github.com/RenanQueiroz/hina-agent/internal/vad"
+	"github.com/RenanQueiroz/hina-agent/internal/vault"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -52,7 +54,7 @@ func cmdServer(args []string) error {
 	if _, err := a.store.Migrate(ctx); err != nil {
 		return err
 	}
-	if _, err := platform.LoadOrCreateMasterKey(a.paths.MasterKeyPath()); err != nil {
+	if err := ensureMasterKey(a); err != nil {
 		return err
 	}
 	res, err := auth.EnsureAdmin(ctx, a.store)
@@ -138,6 +140,14 @@ func cmdServer(args []string) error {
 	if vadEngine != nil {
 		srv.SetVAD(vadEngine)
 	}
+
+	// Phase 7 sandbox + secret vault. The vault + workspace manager are always
+	// built (they back per-user secret/environment management even when tool
+	// execution is off); the sbx runner reports itself unavailable when sbx isn't
+	// installed. SetSandbox builds the tool Router only when [sandbox] is enabled.
+	sandboxRunner, workspaces := buildSandbox(a)
+	srv.SetSandbox(buildVault(a), workspaces, sandboxRunner)
+
 	srv.SetReady(true)
 
 	httpSrv := &http.Server{
@@ -157,6 +167,11 @@ func cmdServer(args []string) error {
 		_ = httpSrv.Shutdown(sc)
 	}()
 
+	// Reap stale ephemeral sandbox scratch in the background until shutdown.
+	if workspaces != nil {
+		go workspaces.Janitor(sigCtx, 10*time.Minute, a.cfg.Sandbox.ScratchTTLOr(time.Hour))
+	}
+
 	scheme := "http"
 	if a.cfg.Server.TLSEnabled() {
 		scheme = "https"
@@ -172,6 +187,84 @@ func cmdServer(args []string) error {
 		return nil
 	}
 	return err
+}
+
+// buildVault constructs the per-user secret vault, loading (or creating) the
+// local master key through internal/platform. It returns nil (logging why) when
+// the key or vault can't be initialized, so the server still runs with secret
+// management disabled rather than failing to start.
+func buildVault(a *app) *vault.Vault {
+	// Windows owner-only ACL / DPAPI master-key protection is a no-op until Phase 12
+	// (internal/platform), so the vault's on-disk boundary is not yet enforced there
+	// — gate it off like local voice rather than store secrets unprotected.
+	if runtime.GOOS == "windows" {
+		a.log.Warn("vault: per-user secret vault is gated to Phase 12 on Windows (owner-only ACL/DPAPI not yet enforced); disabled")
+		return nil
+	}
+	key, err := platform.LoadOrCreateMasterKey(a.paths.MasterKeyPath())
+	if err != nil {
+		a.log.Warn("vault: master key unavailable; secret vault disabled", "err", err)
+		return nil
+	}
+	v, err := vault.New(key, filepath.Join(a.paths.Data, "vault"), a.store)
+	if err != nil {
+		a.log.Warn("vault: init failed; secret vault disabled", "err", err)
+		return nil
+	}
+	return v
+}
+
+// buildSandbox constructs the workspace manager and the sbx runner. Neither
+// requires [sandbox] enabled (the runner just reports unavailable when sbx is
+// absent, and the workspace manager backs storage); SetSandbox decides whether to
+// build the tool Router. Returns a nil workspace manager only if its roots can't
+// be created.
+func buildSandbox(a *app) (sandbox.Runner, *sandbox.WorkspaceManager) {
+	ws, err := sandbox.NewWorkspaceManager(a.paths.Data, a.paths.Runtime, a.log)
+	if err != nil {
+		a.log.Warn("sandbox: workspace manager init failed; sandbox storage disabled", "err", err)
+		ws = nil
+	}
+	// Do NOT probe an external sbx binary at startup for a DISABLED, opt-in feature.
+	// `hina doctor` reports sbx availability separately; the server only resolves/
+	// version-probes/smoke-tests sbx when [sandbox] is enabled.
+	if !a.cfg.Sandbox.Enabled {
+		a.log.Info("sandbox: tools disabled ([sandbox] enabled=false); not probing sbx")
+		return nil, ws
+	}
+	runner := sandbox.NewCLIRunner(sandbox.Config{
+		Path:                 a.cfg.Sandbox.SbxPath,
+		Kit:                  a.cfg.Sandbox.Kit,
+		OutputDir:            filepath.Join(a.paths.Runtime, "sandbox-output"),
+		AllowVersionMismatch: a.cfg.Sandbox.AllowVersionMismatch,
+		Defaults: sandbox.Limits{
+			CPUs:    a.cfg.Sandbox.CPUs,
+			Memory:  a.cfg.Sandbox.Memory,
+			PIDs:    a.cfg.Sandbox.PIDs,
+			Timeout: a.cfg.Sandbox.TimeoutOr(5 * time.Minute),
+		},
+		Log: a.log,
+	})
+	switch {
+	case runtime.GOOS == "windows":
+		// Workspace/capture owner-only ACLs are a Phase 12 no-op on Windows, so the
+		// per-user boundary isn't enforced — gate tools off until then.
+		runner.MarkUnavailable("sandbox tools gated to Phase 12 on Windows (owner-only ACL not yet enforced)")
+		a.log.Warn("sandbox: tools gated to Phase 12 on Windows; disabled")
+	case runner.Available():
+		// Fail closed: run the pinned command-line smoke test before trusting sbx,
+		// so a drifted CLI can't silently run production tool calls.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := runner.Smoke(ctx); err != nil {
+			runner.MarkUnavailable("sbx command-line smoke test failed: " + err.Error())
+			a.log.Warn("sandbox: smoke test failed; tools disabled", "err", err)
+		}
+		cancel()
+	}
+	st := runner.Status()
+	a.log.Info("sandbox runner", "enabled", a.cfg.Sandbox.Enabled,
+		"available", st.Available, "version", st.Version, "reason", st.Reason)
+	return runner, ws
 }
 
 // buildTTS constructs the local TTS engine when [tts] is enabled, wiring the

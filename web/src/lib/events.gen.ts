@@ -272,6 +272,30 @@ export const TypeSpeechStopped = "SpeechStopped"; // server->client: VAD committ
  */
 export const TypeConversationTruncated = "ConversationTruncated";
 /**
+ * Phase 7 sandbox tool-execution event types. A model-requested tool runs inside
+ * the user's sbx sandbox; the server emits ToolCallRequested when the call is
+ * raised (carrying a redacted summary + whether it awaits approval), and
+ * ToolCallCompleted when it finishes (exit/ok/decision). They are LIVE-ONLY
+ * (ephemeral, not persisted/replayed) so the chat UI can render an approval card
+ * and tool activity in real time, but a server restart never replays a stale card
+ * whose in-memory pending decision is gone — the durable record of a run is the
+ * sandbox_runs audit table. Source is SourceSandbox; payloads NEVER carry secret
+ * values.
+ */
+export const TypeToolCallRequested = "ToolCallRequested";
+/**
+ * Phase 7 sandbox tool-execution event types. A model-requested tool runs inside
+ * the user's sbx sandbox; the server emits ToolCallRequested when the call is
+ * raised (carrying a redacted summary + whether it awaits approval), and
+ * ToolCallCompleted when it finishes (exit/ok/decision). They are LIVE-ONLY
+ * (ephemeral, not persisted/replayed) so the chat UI can render an approval card
+ * and tool activity in real time, but a server restart never replays a stale card
+ * whose in-memory pending decision is gone — the durable record of a run is the
+ * sandbox_runs audit table. Source is SourceSandbox; payloads NEVER carry secret
+ * values.
+ */
+export const TypeToolCallCompleted = "ToolCallCompleted";
+/**
  * Event is the typed envelope. JSON field names are the wire contract; note
  * ConversationID serializes as "session_id" (the product-level "session").
  */

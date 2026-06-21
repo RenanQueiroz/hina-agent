@@ -200,6 +200,107 @@ export interface AdminUserList {
   users: AdminUser[];
 }
 /**
+ * SandboxEnvironment is a user's Sandbox Environment policy (GET/PUT
+ * /sandbox/environment). AvailableTools is server-supplied (the built-in tool
+ * set) so the UI can offer the full list; AllowedTools is the user's selection.
+ */
+export interface SandboxEnvironment {
+  allowed_tools: string[];
+  available_tools: string[];
+  mcp_servers: SandboxMCPServer[];
+  network: SandboxNetworkPolicy;
+  writable_mounts: string[];
+  secret_grants: SandboxSecretGrant[];
+}
+/**
+ * SandboxMCPServer is a configured MCP server (name + url).
+ */
+export interface SandboxMCPServer {
+  name: string;
+  url: string;
+}
+/**
+ * SandboxNetworkPolicy is the default posture plus the host:port allow-list.
+ */
+export interface SandboxNetworkPolicy {
+  default: string; // deny | allow
+  allow: SandboxNetworkRule[];
+}
+/**
+ * SandboxNetworkRule is one host:port allow-list entry.
+ */
+export interface SandboxNetworkRule {
+  host: string;
+  port: number /* int */;
+}
+/**
+ * SandboxSecretGrant binds a vaulted secret to its injected env-var name.
+ */
+export interface SandboxSecretGrant {
+  secret_id: string;
+  env_name: string;
+}
+/**
+ * Secret is the non-sensitive metadata for a vaulted secret (never the value).
+ */
+export interface Secret {
+  id: string;
+  name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+}
+/**
+ * SecretList is the GET /sandbox/secrets response.
+ */
+export interface SecretList {
+  secrets: Secret[];
+}
+/**
+ * AdminSandbox is the GET /admin/sandbox response: runtime status + usage.
+ */
+export interface AdminSandbox {
+  runtime: SandboxRuntime;
+  users: SandboxUserUsage[];
+  runs: SandboxRunInfo[];
+}
+/**
+ * SandboxRuntime is the sbx runner status for the admin view.
+ */
+export interface SandboxRuntime {
+  enabled: boolean;
+  available: boolean;
+  version?: string;
+  pinned: string;
+  path?: string;
+  approval: string;
+  reason?: string;
+}
+/**
+ * SandboxUserUsage is one user's sandbox storage + run footprint.
+ */
+export interface SandboxUserUsage {
+  user_id: string;
+  username: string;
+  workspace_bytes: number /* int64 */;
+  run_count: number /* int */;
+}
+/**
+ * SandboxRunInfo is one audit-log row (no secret values; command is redacted).
+ */
+export interface SandboxRunInfo {
+  id: string;
+  user_id: string;
+  conversation_id: string;
+  tool: string;
+  decision: string;
+  exit_code: number /* int */;
+  duration_ms: number /* int64 */;
+  command: string;
+  error: string;
+  created_at: string;
+}
+/**
  * ErrorResponse is the shape of all error bodies.
  */
 export interface ErrorResponse {

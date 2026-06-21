@@ -98,6 +98,91 @@ func TestLoopRunStartErrorIsBackendError(t *testing.T) {
 	}
 }
 
+// toolProvider emits a tool call on the first round and, once it sees a tool
+// result in the context, a final text reply.
+type toolProvider struct {
+	calls int
+}
+
+func (p *toolProvider) Name() string { return "tool" }
+
+func (p *toolProvider) Stream(ctx context.Context, req llm.Request) (<-chan llm.Delta, error) {
+	hasResult := false
+	for _, m := range req.Messages {
+		if m.Role == llm.RoleTool {
+			hasResult = true
+		}
+	}
+	ch := make(chan llm.Delta, 2)
+	go func() {
+		defer close(ch)
+		if hasResult {
+			ch <- llm.Delta{Text: "done"}
+			ch <- llm.Delta{Done: true}
+			return
+		}
+		p.calls++
+		ch <- llm.Delta{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "shell", Arguments: `{"command":"ls"}`}}}
+		ch <- llm.Delta{Done: true}
+	}()
+	return ch, nil
+}
+
+func TestLoopRunsToolThenAnswers(t *testing.T) {
+	var gotCall ToolCall
+	hook := func(_ context.Context, c ToolCall) (ToolResult, error) {
+		gotCall = c
+		return ToolResult{Content: "file1\nfile2"}, nil
+	}
+	l := NewLoop(&toolProvider{}, hook)
+	res := l.Run(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "list files"}}, nil)
+	if res.Err != nil || res.Interrupted {
+		t.Fatalf("run: err=%v interrupted=%v", res.Err, res.Interrupted)
+	}
+	if res.Text != "done" {
+		t.Fatalf("final text = %q, want %q", res.Text, "done")
+	}
+	if gotCall.Name != "shell" {
+		t.Fatalf("hook saw tool %q, want shell", gotCall.Name)
+	}
+	if string(gotCall.Arguments) != `{"command":"ls"}` {
+		t.Fatalf("hook saw args %q", gotCall.Arguments)
+	}
+}
+
+// alwaysToolProvider never stops requesting tools, to exercise the round cap.
+type alwaysToolProvider struct{}
+
+func (alwaysToolProvider) Name() string { return "loop" }
+func (alwaysToolProvider) Stream(ctx context.Context, _ llm.Request) (<-chan llm.Delta, error) {
+	ch := make(chan llm.Delta, 2)
+	go func() {
+		defer close(ch)
+		ch <- llm.Delta{ToolCalls: []llm.ToolCall{{ID: "c", Name: "shell", Arguments: "{}"}}}
+		ch <- llm.Delta{Done: true}
+	}()
+	return ch, nil
+}
+
+func TestLoopToolRoundLimit(t *testing.T) {
+	hook := func(_ context.Context, _ ToolCall) (ToolResult, error) { return ToolResult{Content: "x"}, nil }
+	l := NewLoop(alwaysToolProvider{}, hook)
+	res := l.Run(context.Background(), nil, nil)
+	if !errors.Is(res.Err, ErrToolRoundLimit) {
+		t.Fatalf("err = %v, want ErrToolRoundLimit", res.Err)
+	}
+}
+
+func TestLoopToolCallsIgnoredWithoutHook(t *testing.T) {
+	// A provider emitting tool calls but no hook wired must not loop — it returns
+	// whatever text it produced (here none) without error.
+	l := NewLoop(&toolProvider{}, nil)
+	res := l.Run(context.Background(), nil, nil)
+	if res.Err != nil || res.Interrupted {
+		t.Fatalf("run: err=%v interrupted=%v", res.Err, res.Interrupted)
+	}
+}
+
 func TestLoopRunCancellationIsInterruptNotError(t *testing.T) {
 	// A provider that delivers one delta then blocks; cancelling mid-stream must be
 	// classified as an interrupt with the partial preserved, never a backend error.

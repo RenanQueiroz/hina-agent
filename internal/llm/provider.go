@@ -12,6 +12,7 @@ const (
 	RoleSystem    = "system"
 	RoleUser      = "user"
 	RoleAssistant = "assistant"
+	RoleTool      = "tool" // a tool-call result fed back into context
 )
 
 // Message is one entry of model context.
@@ -20,17 +21,29 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+// ToolCall is one model-requested tool invocation surfaced by a tool-capable
+// provider. Arguments is the raw JSON arguments object. The agent loop routes it
+// to the per-user approval + sandbox layer (Phase 7) and feeds the result back as
+// a RoleTool message for the next round.
+type ToolCall struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
 // Request is a streaming completion request.
 type Request struct {
 	Messages []Message
 }
 
-// Delta is one streamed event. Exactly one of Text/Err is meaningful, or Done
-// marks normal completion.
+// Delta is one streamed event. Exactly one of Text/ToolCalls/Err is meaningful,
+// or Done marks normal completion. A provider that wants to call tools emits a
+// delta with ToolCalls (and no Text); the loop executes them and re-streams.
 type Delta struct {
-	Text string
-	Err  error
-	Done bool
+	Text      string
+	ToolCalls []ToolCall
+	Err       error
+	Done      bool
 }
 
 // Provider streams assistant text for a request. Implementations must stop and

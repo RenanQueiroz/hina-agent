@@ -24,7 +24,7 @@ If you're unsure whether a doc is affected, check it. When you finish a task, it
 
 A server-first, web-first, **multi-user voice and text agent** (V2), cross-platform from commit 1 (Windows 11 x64, macOS Apple Silicon, Linux x86_64). One Go binary (`cmd/hina`) serves a versioned JSON/SSE API and an embedded React/Vite web client. Local **and** cloud STT-LLM-TTS, Docker `sbx` sandboxing, per-user secrets, and callable-agent Automations land across a phased roadmap.
 
-Current state: **Phases 1–6 complete** — control plane, streaming text chat, a pure-Go WebRTC audio bridge, local TTS (Supertonic), local streaming ASR (Nemotron 3.5), and the **live voice pipeline** (Silero VAD + semantic VAD + speak-to-interrupt barge-in + echo/backchannel handling, a shared agent loop, and a benchmark harness) — all local inference via ONNX Runtime behind the `onnx` build tag. See `README.md` for the per-phase feature breakdown and `plans/roadmap.md` for what's next.
+Current state: **Phases 1–7 complete** — control plane, streaming text chat, a pure-Go WebRTC audio bridge, local TTS (Supertonic), local streaming ASR (Nemotron 3.5), the **live voice pipeline** (Silero VAD + semantic VAD + speak-to-interrupt barge-in + echo/backchannel handling, a shared agent loop, and a benchmark harness) — all local inference via ONNX Runtime behind the `onnx` build tag — and the **per-user security boundary**: a Docker `sbx` sandbox runner, a per-user encrypted secret vault (envelope encryption; values never in the DB), a Sandbox Environment policy, and the tool-execution boundary (shell/file/HTTP) routed through the sandbox with policy + an approval flow + an audit log. The execution boundary is exercised end-to-end via the built-in mock provider's `/sh` trigger; wiring a cloud/openai-compat LLM to *emit* tool calls is follow-on (Phase 8). See `README.md` for the per-phase feature breakdown and `plans/roadmap.md` for what's next.
 
 ## Repository map
 
@@ -41,7 +41,7 @@ internal/
   id/                Prefixed, URL-safe random IDs
   logbuf/            In-memory log ring buffer fanned out to the admin UI
   llm/               Streaming text provider abstraction: mock | openai (Responses API) | openai-compat
-  agent/             Context builder from canonical turns + the shared cancellable agent Loop (text + voice run it; tool-call hook reserved for Phase 7)
+  agent/             Context builder from canonical turns + the shared cancellable agent Loop (text + voice run it; drives tool-call rounds through the sandbox hook)
   wire/              JSON DTOs exchanged with the web client (source for generated TS)
   audio/             Resample (48k→16k/24k), PCM↔float32, tone generator, binary audio-frame framing
   rtc/               Pion WebRTC bridge: session lifecycle, inbound mic pipeline, outbound PCM pacer, control events, metrics, TTS speak, and the Phase 6 live-voice loop (live.go: VAD→ASR→agent→TTS + barge-in)
@@ -50,6 +50,8 @@ internal/
   asr/               Nemotron 3.5 streaming ASR port: Go log-mel front-end + FFT, SentencePiece tokenizer, cache-aware encoder + RNNT greedy decode, name-biasing trie, wake-word strip (CGo-free; runs on internal/onnx)
   vad/               Silero VAD port: pure-Go online turn-boundary state machine + pre-roll over the shared internal/onnx runtime (CGo-free; real model behind the `onnx` tag)
   voice/             Live turn detection: OpenAI-shaped turn_detection config, semantic VAD v1, backchannel filter, echo suppression, composed into a Pipeline (pure-Go; driven by rtc + bench)
+  vault/             Per-user secret vault: envelope encryption (per-secret AES-256-GCM data key wrapped by the platform master key), owner-private on-disk blobs (never in the DB), run-scoped env injection + a secret redactor
+  sandbox/           Docker `sbx` runner (pinned + smoke-tested CLIRunner, argv/policy builders, process-tree exec), WorkspaceManager (durable/ephemeral + janitor + quota), Environment policy, and the tool Router (policy + secret injection + approval + audit). CGo-free; fake-sbx-shim tested
   bench/             Live-voice benchmark harness: replays labeled fixtures through the real pipeline, percentile metrics (drives `hina bench`; non-interactive on every host)
   assets/            Pinned local-inference downloads (ORT + Supertonic + Nemotron + Silero models) with SHA256 verify/extract; drives `hina assets`
 web/                 React 19 + Vite + Tailwind client (embedded into the binary via web/dist)

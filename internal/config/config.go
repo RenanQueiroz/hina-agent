@@ -25,8 +25,78 @@ type Config struct {
 	TTS      TTSConfig      `toml:"tts"`
 	ASR      ASRConfig      `toml:"asr"`
 	Voice    VoiceConfig    `toml:"voice"`
+	Sandbox  SandboxConfig  `toml:"sandbox"`
 	Paths    PathsConfig    `toml:"paths"`
 	Log      LogConfig      `toml:"log"`
+}
+
+// SandboxConfig configures the Docker `sbx` runner that backs main-model tool
+// execution and (later) Automations (Phase 7). It is off by default: tool calls
+// require a working, pinned `sbx` install. When enabled but `sbx` is absent the
+// server still runs — tool calls just report the sandbox unavailable. Approval is
+// the admin policy for the approval-card flow ("always" prompts per tool call;
+// "auto" runs without prompting but still audits).
+type SandboxConfig struct {
+	Enabled              bool   `toml:"enabled"`                // turn on sandbox-backed tool execution
+	SbxPath              string `toml:"sbx_path"`               // override the sbx binary path (default: PATH lookup)
+	Kit                  string `toml:"kit"`                    // admin-controlled sbx kit/template (optional)
+	Approval             string `toml:"approval"`               // always | auto (default always)
+	CPUs                 string `toml:"cpus"`                   // default per-run CPU limit, e.g. "2"
+	Memory               string `toml:"memory"`                 // default per-run memory limit, e.g. "2g"
+	PIDs                 int    `toml:"pids"`                   // default per-run process limit (0 = omit)
+	Timeout              string `toml:"timeout"`                // default per-run wall-clock cap, e.g. "5m"
+	WorkspaceQuotaMB     int    `toml:"workspace_quota_mb"`     // per-user durable workspace quota (0 = unlimited)
+	ScratchTTL           string `toml:"scratch_ttl"`            // reap ephemeral run scratch older than this, e.g. "1h"
+	ApprovalTimeout      string `toml:"approval_timeout"`       // deny a tool call if undecided after this, e.g. "5m"
+	AllowVersionMismatch bool   `toml:"allow_version_mismatch"` // run tools even when sbx's minor != the pinned version
+	// NetworkIsolated asserts that the operator has locked down the sbx container's
+	// network egress (Balanced/Locked-Down). Hina cannot enforce container-level
+	// egress for a general shell command itself, so granted secrets are injected into
+	// a run ONLY when this is true — otherwise a shell `curl` could exfiltrate a
+	// secret despite a default-deny Sandbox Environment. Default false = fail closed.
+	NetworkIsolated bool `toml:"network_isolated"`
+}
+
+// ApprovalMode returns the configured approval policy, defaulting to "always".
+func (s SandboxConfig) ApprovalMode() string {
+	if s.Approval == "" {
+		return "always"
+	}
+	return s.Approval
+}
+
+// TimeoutOr parses Timeout, falling back to def when empty or invalid.
+func (s SandboxConfig) TimeoutOr(def time.Duration) time.Duration {
+	return parseDurationOr(s.Timeout, def)
+}
+
+// ScratchTTLOr parses ScratchTTL, falling back to def when empty or invalid.
+func (s SandboxConfig) ScratchTTLOr(def time.Duration) time.Duration {
+	return parseDurationOr(s.ScratchTTL, def)
+}
+
+// ApprovalTimeoutOr parses ApprovalTimeout, falling back to def.
+func (s SandboxConfig) ApprovalTimeoutOr(def time.Duration) time.Duration {
+	return parseDurationOr(s.ApprovalTimeout, def)
+}
+
+// WorkspaceQuotaBytes returns the per-user workspace quota in bytes (0 = unlimited).
+func (s SandboxConfig) WorkspaceQuotaBytes() int64 {
+	if s.WorkspaceQuotaMB <= 0 {
+		return 0
+	}
+	return int64(s.WorkspaceQuotaMB) << 20
+}
+
+func parseDurationOr(s string, def time.Duration) time.Duration {
+	if s == "" {
+		return def
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return def
+	}
+	return d
 }
 
 // ASRConfig configures the local streaming speech-to-text engine (Phase 5,
@@ -283,6 +353,15 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("HINA_VOICE_ENABLED"); v != "" {
 		c.Voice.Enabled = v == "1" || v == "true"
 	}
+	if v := os.Getenv("HINA_SANDBOX_ENABLED"); v != "" {
+		c.Sandbox.Enabled = v == "1" || v == "true"
+	}
+	if v := os.Getenv("HINA_SANDBOX_SBX_PATH"); v != "" {
+		c.Sandbox.SbxPath = v
+	}
+	if v := os.Getenv("HINA_SANDBOX_APPROVAL"); v != "" {
+		c.Sandbox.Approval = v
+	}
 	if v := os.Getenv("HINA_REALTIME_ICE_SERVERS"); v != "" {
 		// Env is the simple STUN path: a comma-separated URL list, each its own
 		// server with no credentials. TURN (which needs credentials) is config-file
@@ -407,6 +486,28 @@ func (c Config) Validate() error {
 	// silently install to one dir while a server looked in another, so reject them.
 	if c.TTS.AssetsDir != "" && c.ASR.AssetsDir != "" && c.TTS.AssetsDir != c.ASR.AssetsDir {
 		return fmt.Errorf("tts.assets_dir (%q) and asr.assets_dir (%q) must match — TTS and ASR share one asset root", c.TTS.AssetsDir, c.ASR.AssetsDir)
+	}
+	// Sandbox: validate the approval policy and the duration/limit fields so a typo
+	// fails closed at load rather than silently degrading tool execution.
+	switch c.Sandbox.Approval {
+	case "", "always", "auto":
+	default:
+		return fmt.Errorf("sandbox.approval %q must be always|auto", c.Sandbox.Approval)
+	}
+	if c.Sandbox.PIDs < 0 {
+		return fmt.Errorf("sandbox.pids %d must be >= 0", c.Sandbox.PIDs)
+	}
+	if c.Sandbox.WorkspaceQuotaMB < 0 {
+		return fmt.Errorf("sandbox.workspace_quota_mb %d must be >= 0", c.Sandbox.WorkspaceQuotaMB)
+	}
+	for _, f := range []struct {
+		name, val string
+	}{{"sandbox.timeout", c.Sandbox.Timeout}, {"sandbox.scratch_ttl", c.Sandbox.ScratchTTL}, {"sandbox.approval_timeout", c.Sandbox.ApprovalTimeout}} {
+		if f.val != "" {
+			if d, err := time.ParseDuration(f.val); err != nil || d < 0 {
+				return fmt.Errorf("%s %q must be a non-negative duration (e.g. \"5m\")", f.name, f.val)
+			}
+		}
 	}
 	for _, srv := range c.Realtime.ICEServers {
 		if len(srv.URLs) == 0 {

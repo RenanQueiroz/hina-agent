@@ -56,9 +56,112 @@ export function AdminPage() {
         {users.isLoading ? <Spinner /> : <UsersTable users={users.data ?? []} />}
       </Card>
 
+      <SandboxPanel />
       <LiveSessionsPanel />
       <LogsPanel />
     </div>
+  );
+}
+
+// SandboxPanel shows the Phase 7 sbx runner status, per-user storage/run usage,
+// and the recent tool-run audit log (no secret values; commands are redacted).
+function SandboxPanel() {
+  const sb = useQuery({
+    queryKey: ["admin", "sandbox"],
+    queryFn: api.adminSandbox,
+    refetchInterval: 5000,
+  });
+  const rt = sb.data?.runtime;
+  const status = !rt?.enabled ? "disabled" : rt?.available ? "available" : "unavailable";
+  return (
+    <Card className="p-4">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">
+        Sandbox runtime &amp; usage
+      </h2>
+      {sb.isLoading ? (
+        <Spinner />
+      ) : (
+        <>
+          <dl className="mb-4 grid grid-cols-[140px_1fr] gap-y-1 text-sm">
+            <dt className="text-zinc-500">Status</dt>
+            <dd>{status}</dd>
+            <dt className="text-zinc-500">sbx version</dt>
+            <dd>
+              {rt?.version ? `${rt.version} (pinned ${rt.pinned})` : (
+                <span className="text-zinc-400">{rt?.reason || "not installed"}</span>
+              )}
+            </dd>
+            <dt className="text-zinc-500">Approval</dt>
+            <dd>{rt?.approval}</dd>
+          </dl>
+
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+            Per-user usage
+          </h3>
+          <table className="mb-4 w-full text-left text-sm">
+            <thead className="text-zinc-500">
+              <tr>
+                {["User", "Workspace", "Tool runs"].map((h) => (
+                  <th key={h} className="py-1 pr-3 font-medium">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(sb.data?.users ?? []).map((u) => (
+                <tr key={u.user_id} className="border-t border-zinc-100 dark:border-zinc-800">
+                  <td className="py-1.5 pr-3">{u.username}</td>
+                  <td className="py-1.5 pr-3">{(u.workspace_bytes / 1024).toFixed(0)} KiB</td>
+                  <td className="py-1.5 pr-3">{u.run_count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+            Recent tool runs
+          </h3>
+          {(sb.data?.runs ?? []).length === 0 ? (
+            <p className="text-sm text-zinc-400">No tool runs yet.</p>
+          ) : (
+            <div className="max-h-64 overflow-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-zinc-500">
+                  <tr>
+                    {["When", "Tool", "Decision", "Exit", "Command", "Status / error"].map((h) => (
+                      <th key={h} className="py-1 pr-3 font-medium">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {(sb.data?.runs ?? []).map((r) => (
+                    <tr key={r.id} className="border-t border-zinc-100 dark:border-zinc-800">
+                      <td className="py-1 pr-3">{new Date(r.created_at).toLocaleTimeString()}</td>
+                      <td className="py-1 pr-3">{r.tool}</td>
+                      <td className="py-1 pr-3">{r.decision}</td>
+                      <td className="py-1 pr-3">{r.exit_code}</td>
+                      <td className="py-1 pr-3 max-w-xs truncate">{r.command}</td>
+                      <td className="py-1 pr-3 max-w-xs truncate">
+                        {r.error ? (
+                          <span className="text-red-500">{r.error}</span>
+                        ) : r.exit_code === 0 ? (
+                          <span className="text-green-600">ok</span>
+                        ) : (
+                          <span className="text-zinc-400">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
   );
 }
 
