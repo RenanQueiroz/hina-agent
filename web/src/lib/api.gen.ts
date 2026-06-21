@@ -301,6 +301,99 @@ export interface SandboxRunInfo {
   created_at: string;
 }
 /**
+ * AgentInfo is one callable coding-agent's catalog entry for a user: its static
+ * capability plus that user's profile state and current eligibility to run. It
+ * never carries a credential — only the auth-profile TYPE.
+ */
+export interface AgentInfo {
+  provider: string;
+  display_name: string;
+  auth_types: string[]; // profile types the user may configure
+  browser_auth: boolean; // supports interactive login
+  local_only: boolean; // Pi
+  tool_name: string; // routable tool, e.g. "agent.codex.run"
+  configured: boolean; // a profile exists
+  configured_auth_type?: string;
+  status?: string; // profile status (authenticated/...)
+  runnable: boolean; // eligible to be called right now
+  reason?: string; // why not runnable / not configurable
+}
+/**
+ * AgentCatalog is the GET /agents response: the per-user agent list + the
+ * server-level gates that decide eligibility.
+ */
+export interface AgentCatalog {
+  enabled: boolean; // [sandbox] tool execution on
+  browser_auth_available: boolean; // interactive login usable (sbx present)
+  network_isolated: boolean; // operator asserted controlled egress
+  agents: AgentInfo[];
+}
+/**
+ * SetAgentKey is the POST /agents/{provider}/key body (configure an API-key/token
+ * profile). The value is write-only — never returned.
+ */
+export interface SetAgentKey {
+  auth_type: string; // api_key | oauth_token
+  value: string;
+}
+/**
+ * StartAgentLogin is the POST /agents/{provider}/login body.
+ */
+export interface StartAgentLogin {
+  device_auth: boolean; // use the device/paste-code flow
+}
+/**
+ * AgentLoginStarted is the POST /agents/{provider}/login response.
+ */
+export interface AgentLoginStarted {
+  session_id: string;
+}
+/**
+ * AgentLoginInput is the POST /agents/login/{id}/input body (a pasted code/line).
+ */
+export interface AgentLoginInput {
+  data: string;
+}
+/**
+ * AgentLoginHint is an actionable item detected in login output (URL/code/prompt).
+ */
+export interface AgentLoginHint {
+  kind: string;
+  value: string;
+}
+/**
+ * AgentLoginFrame is one streamed login event over the login SSE channel. It never
+ * carries a persisted credential — only the transient live view.
+ */
+export interface AgentLoginFrame {
+  type: string; // output | hint | done
+  text?: string;
+  hint?: AgentLoginHint;
+  ok?: boolean;
+  error?: string;
+}
+/**
+ * AdminAgentProfile is one user's coarse agent-profile status for the admin view —
+ * never a token/URL/code.
+ */
+export interface AdminAgentProfile {
+  user_id: string;
+  username: string;
+  provider: string;
+  auth_type: string;
+  status: string;
+  updated_at: string;
+}
+/**
+ * AdminAgents is the GET /admin/agents response.
+ */
+export interface AdminAgents {
+  available: boolean;
+  browser_auth_available: boolean;
+  reason?: string;
+  profiles: AdminAgentProfile[];
+}
+/**
  * ErrorResponse is the shape of all error bodies.
  */
 export interface ErrorResponse {

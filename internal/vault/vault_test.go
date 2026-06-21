@@ -131,6 +131,22 @@ func TestVaultCrossUserIsolation(t *testing.T) {
 	}
 }
 
+func TestVaultAgentStateVersionWriteUnique(t *testing.T) {
+	v, _, uid, _, _ := newTestVault(t)
+	_ = v.PutAgentState(uid, "codex", []byte("same-value"))
+	got, v1, err := v.GetAgentStateVersioned(uid, "codex")
+	if err != nil || string(got) != "same-value" || v1 == "" {
+		t.Fatalf("versioned get: data=%q ver=%q err=%v", got, v1, err)
+	}
+	// Delete + re-add the SAME plaintext: the write-unique version MUST change (a fresh
+	// envelope nonce), so a same-value re-auth during a run is detectable.
+	_ = v.DeleteAgentState(uid, "codex")
+	_ = v.PutAgentState(uid, "codex", []byte("same-value"))
+	if v2 := v.AgentStateVersion(uid, "codex"); v2 == "" || v2 == v1 {
+		t.Fatalf("write-unique version unchanged after same-value recreate: %q -> %q", v1, v2)
+	}
+}
+
 func TestVaultDelete(t *testing.T) {
 	ctx := context.Background()
 	v, _, uid, _, root := newTestVault(t)
@@ -259,6 +275,50 @@ func TestRedactorLongestFirst(t *testing.T) {
 	r := NewRedactor([]string{"abc", "abcdef"})
 	if got := r.Redact("xx abcdef yy"); strings.Contains(got, "abc") {
 		t.Fatalf("redact left a fragment: %q", got)
+	}
+}
+
+func TestRedactorJSONTraversal(t *testing.T) {
+	r := NewRedactor([]string{"topsecret/value-12345"})
+	// The same secret encoded three valid ways inside JSON: canonical, escaped solidus,
+	// and a \uXXXX escape of the leading char. Decoding normalizes all to the plaintext.
+	cases := [][]byte{
+		[]byte(`{"v":"topsecret/value-12345"}`),
+		[]byte(`{"v":"topsecret\/value-12345"}`),
+		[]byte(`{"v":"\u0074opsecret/value-12345"}`), // \uXXXX escape of 't'
+		[]byte(`{"topsecret/value-12345":"x"}`),      // as a KEY
+		[]byte(`["a","topsecret\/value-12345"]`),
+	}
+	for _, data := range cases {
+		if !r.JSONContainsSecret(data) {
+			t.Errorf("JSONContainsSecret missed an encoded secret: %s", data)
+		}
+		if got := r.RedactJSON(data); strings.Contains(string(got), "value-12345") {
+			t.Errorf("RedactJSON left an encoded secret: %s -> %s", data, got)
+		}
+	}
+	// Non-JSON falls back to a raw substring check / redaction.
+	if !r.JSONContainsSecret([]byte("plain topsecret/value-12345 here")) {
+		t.Fatal("non-JSON fallback ContainsSecret failed")
+	}
+	if got := r.RedactJSON([]byte("plain topsecret/value-12345 here")); strings.Contains(string(got), "value-12345") {
+		t.Fatalf("non-JSON fallback redaction failed: %q", got)
+	}
+}
+
+func TestRedactorJSONNumericSecret(t *testing.T) {
+	r := NewRedactor([]string{"31337"})
+	data := []byte(`{"const":31337,"nested":[31337],"s":"x"}`)
+	if !r.JSONContainsSecret(data) {
+		t.Fatal("a numeric secret embedded as a JSON number was not detected")
+	}
+	if got := r.RedactJSON(data); strings.Contains(string(got), "31337") {
+		t.Fatalf("a numeric secret survived RedactJSON: %s", got)
+	}
+	// A non-secret large integer keeps its exact value (UseNumber avoids float64 loss).
+	r2 := NewRedactor([]string{"99999"})
+	if got := r2.RedactJSON([]byte(`{"n":12345678901234567890}`)); !strings.Contains(string(got), "12345678901234567890") {
+		t.Fatalf("a non-secret number lost precision: %s", got)
 	}
 }
 

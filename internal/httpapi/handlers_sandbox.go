@@ -236,7 +236,7 @@ func (s *Server) handleAdminSandbox(w http.ResponseWriter, r *http.Request) {
 func toWireEnvironment(env sandbox.Environment) wire.SandboxEnvironment {
 	out := wire.SandboxEnvironment{
 		AllowedTools:   env.AllowedTools,
-		AvailableTools: sandbox.BuiltinTools,
+		AvailableTools: sandbox.AllToolNames(),
 		WritableMounts: env.WritableMounts,
 		Network:        wire.SandboxNetworkPolicy{Default: env.Network.Default},
 	}

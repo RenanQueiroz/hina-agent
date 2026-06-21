@@ -1,7 +1,9 @@
 package vault
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -124,6 +126,101 @@ func NewRedactor(values []string) *Redactor {
 	}
 	sort.Slice(vals, func(i, j int) bool { return len(vals[i]) > len(vals[j]) })
 	return &Redactor{values: vals}
+}
+
+// RedactJSON scrubs secrets from JSON data by DECODING it and redacting the plaintext
+// string values (then re-marshaling), so ANY valid JSON encoding of a secret — `\"`,
+// `\/`, `\uXXXX`, etc. — is normalized to the plaintext the redactor knows and matched
+// (enumerating one canonical escaped form is not enough). Keys are redacted too. If
+// data is not valid JSON it falls back to a raw byte redaction (best-effort).
+func (r *Redactor) RedactJSON(data []byte) []byte {
+	if r == nil {
+		return data
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber() // numbers stay json.Number (their string form), so a numeric secret is seen
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return r.RedactBytes(data)
+	}
+	out, err := json.Marshal(r.redactJSONValue(v))
+	if err != nil {
+		return r.RedactBytes(data)
+	}
+	return out
+}
+
+func (r *Redactor) redactJSONValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		return r.Redact(t)
+	case json.Number:
+		// A numeric secret (e.g. 31337) decodes to json.Number, whose string form holds
+		// the digits. If it carries a secret, return the redacted STRING (it can no longer
+		// marshal as a number); otherwise keep the json.Number to preserve precision.
+		if red := r.Redact(string(t)); red != string(t) {
+			return red
+		}
+		return t
+	case []any:
+		for i := range t {
+			t[i] = r.redactJSONValue(t[i])
+		}
+		return t
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[r.Redact(k)] = r.redactJSONValue(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// JSONContainsSecret reports whether JSON data carries a secret. It checks the raw bytes
+// (catching a numeric/scalar secret, which appears literally, and a plaintext secret in
+// non-JSON data) AND the DECODED string/number values (catching a secret embedded under
+// any valid JSON escaping). Either path matching is a hit.
+func (r *Redactor) JSONContainsSecret(data []byte) bool {
+	if r == nil {
+		return false
+	}
+	if r.ContainsSecret(string(data)) {
+		return true
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return false // not JSON — the raw check above already covered it
+	}
+	return r.jsonValueContainsSecret(v)
+}
+
+func (r *Redactor) jsonValueContainsSecret(v any) bool {
+	switch t := v.(type) {
+	case string:
+		return r.ContainsSecret(t)
+	case json.Number:
+		return r.ContainsSecret(string(t))
+	case []any:
+		for _, e := range t {
+			if r.jsonValueContainsSecret(e) {
+				return true
+			}
+		}
+		return false
+	case map[string]any:
+		for k, val := range t {
+			if r.ContainsSecret(k) || r.jsonValueContainsSecret(val) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // Merge returns a redactor that scrubs the UNION of this redactor's values and

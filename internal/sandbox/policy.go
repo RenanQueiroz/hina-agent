@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/RenanQueiroz/hina-agent/internal/agentcli"
 )
 
 // StateKind is the sandbox_state.kind value under which a user's Sandbox
@@ -14,6 +16,28 @@ const StateKind = "environment"
 // runs inside the user's `sbx` sandbox; the per-user Environment allow-list
 // decides which are offered.
 var BuiltinTools = []string{ToolShell, ToolFSRead, ToolFSWrite, ToolHTTP}
+
+// agentToolNames are the callable-agent run tools (agent.<provider>.run). They are
+// part of the same per-user Environment tool allow-list as the built-ins, so a user
+// who removes one stops the model from invoking that agent (the auth profile is a
+// separate, additional requirement).
+func agentToolNames() []string {
+	caps := agentcli.Capabilities()
+	out := make([]string, 0, len(caps))
+	for _, c := range caps {
+		out = append(out, c.ToolName)
+	}
+	return out
+}
+
+// AllToolNames is every tool name the Environment governs: the built-ins plus the
+// callable-agent run tools. It is the universe the UI offers and Validate accepts.
+func AllToolNames() []string {
+	out := make([]string, 0, len(BuiltinTools)+4)
+	out = append(out, BuiltinTools...)
+	out = append(out, agentToolNames()...)
+	return out
+}
 
 // envNameRe validates a granted secret's injected env-var name.
 var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -84,14 +108,14 @@ type SecretGrant struct {
 	EnvName  string `json:"env_name"`
 }
 
-// DefaultEnvironment is the conservative starting policy: every built-in tool is
-// available (each already runs inside the isolated sandbox), but the network is
-// default-deny and no secrets are granted until the user opts in.
+// DefaultEnvironment is the conservative starting policy: every tool (built-in +
+// callable agent) is allowed (each already runs inside the isolated sandbox, and an
+// agent run additionally requires a configured auth profile), but the network is
+// default-deny and no secrets are granted until the user opts in. A user who saves a
+// policy with a tool removed blocks it — including an agent tool.
 func DefaultEnvironment() Environment {
-	tools := make([]string, len(BuiltinTools))
-	copy(tools, BuiltinTools)
 	return Environment{
-		AllowedTools: tools,
+		AllowedTools: AllToolNames(),
 		Network:      NetworkPolicy{Default: "deny"},
 	}
 }
@@ -124,8 +148,8 @@ func (e Environment) NetworkAllowed(host string, port int) bool {
 // on anything the runtime would otherwise have to guess about.
 func (e Environment) Validate() error {
 	for _, t := range e.AllowedTools {
-		if !isBuiltinTool(t) {
-			return fmt.Errorf("unknown tool %q (allowed: %s)", t, strings.Join(BuiltinTools, ", "))
+		if !isKnownTool(t) {
+			return fmt.Errorf("unknown tool %q (allowed: %s)", t, strings.Join(AllToolNames(), ", "))
 		}
 	}
 	switch strings.ToLower(e.Network.Default) {
@@ -180,8 +204,8 @@ func (e Environment) Normalize() Environment {
 	return e
 }
 
-func isBuiltinTool(t string) bool {
-	for _, b := range BuiltinTools {
+func isKnownTool(t string) bool {
+	for _, b := range AllToolNames() {
 		if b == t {
 			return true
 		}

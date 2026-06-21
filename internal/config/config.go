@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/RenanQueiroz/hina-agent/internal/agentcli"
 )
 
 // Config is the full server configuration.
@@ -26,8 +28,49 @@ type Config struct {
 	ASR      ASRConfig      `toml:"asr"`
 	Voice    VoiceConfig    `toml:"voice"`
 	Sandbox  SandboxConfig  `toml:"sandbox"`
+	Agents   AgentsConfig   `toml:"agents"`
 	Paths    PathsConfig    `toml:"paths"`
 	Log      LogConfig      `toml:"log"`
+}
+
+// AgentsConfig configures the callable coding-agent CLIs (Phase 8: Codex/Claude/
+// Cursor/Pi as typed, sandboxed tools + the per-user auth broker). It is off by
+// default and builds on [sandbox]: agent runs execute inside `sbx` and therefore
+// require [sandbox] enabled + a working sbx install, and — because an agent run
+// carries provider credentials and needs network egress Hina can't gate per
+// container yet — they additionally require [sandbox] network_isolated=true (fail
+// closed). Approval reuses the [sandbox] approval policy.
+type AgentsConfig struct {
+	Enabled   bool     `toml:"enabled"`   // turn on callable agents (needs [sandbox])
+	Timeout   string   `toml:"timeout"`   // per-run wall-clock cap, e.g. "10m"
+	Providers []string `toml:"providers"` // allow-list of providers (empty = all built-in)
+	// LocalEndpoint is the host-inference proxy base URL Pi targets (the Phase 11
+	// managed llama.cpp gateway, e.g. "http://host.docker.internal:8081/v1"). Empty
+	// until Phase 11 — Pi then reports unavailable rather than reaching any cloud.
+	LocalEndpoint string `toml:"local_endpoint"`
+}
+
+// knownAgentProviders is the built-in provider set (kept local so config stays
+// dependency-free; mirrors internal/agentcli).
+var knownAgentProviders = map[string]bool{"codex": true, "claude": true, "cursor": true, "pi": true}
+
+// TimeoutOr parses Timeout, falling back to def.
+func (a AgentsConfig) TimeoutOr(def time.Duration) time.Duration {
+	return parseDurationOr(a.Timeout, def)
+}
+
+// ProviderAllowed reports whether provider may be offered (an empty allow-list
+// permits every built-in provider).
+func (a AgentsConfig) ProviderAllowed(provider string) bool {
+	if len(a.Providers) == 0 {
+		return true
+	}
+	for _, p := range a.Providers {
+		if p == provider {
+			return true
+		}
+	}
+	return false
 }
 
 // SandboxConfig configures the Docker `sbx` runner that backs main-model tool
@@ -362,6 +405,12 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("HINA_SANDBOX_APPROVAL"); v != "" {
 		c.Sandbox.Approval = v
 	}
+	if v := os.Getenv("HINA_AGENTS_ENABLED"); v != "" {
+		c.Agents.Enabled = v == "1" || v == "true"
+	}
+	if v := os.Getenv("HINA_AGENTS_LOCAL_ENDPOINT"); v != "" {
+		c.Agents.LocalEndpoint = v
+	}
 	if v := os.Getenv("HINA_REALTIME_ICE_SERVERS"); v != "" {
 		// Env is the simple STUN path: a comma-separated URL list, each its own
 		// server with no credentials. TURN (which needs credentials) is config-file
@@ -502,12 +551,23 @@ func (c Config) Validate() error {
 	}
 	for _, f := range []struct {
 		name, val string
-	}{{"sandbox.timeout", c.Sandbox.Timeout}, {"sandbox.scratch_ttl", c.Sandbox.ScratchTTL}, {"sandbox.approval_timeout", c.Sandbox.ApprovalTimeout}} {
+	}{{"sandbox.timeout", c.Sandbox.Timeout}, {"sandbox.scratch_ttl", c.Sandbox.ScratchTTL}, {"sandbox.approval_timeout", c.Sandbox.ApprovalTimeout}, {"agents.timeout", c.Agents.Timeout}} {
 		if f.val != "" {
 			if d, err := time.ParseDuration(f.val); err != nil || d < 0 {
 				return fmt.Errorf("%s %q must be a non-negative duration (e.g. \"5m\")", f.name, f.val)
 			}
 		}
+	}
+	// Agents: validate the provider allow-list so a typo fails closed at load.
+	for _, p := range c.Agents.Providers {
+		if !knownAgentProviders[p] {
+			return fmt.Errorf("agents.providers %q is unknown (codex|claude|cursor|pi)", p)
+		}
+	}
+	// Pi's local endpoint must be a local/host-gateway address — a non-local URL would
+	// make the "local-only" Pi agent send prompts to a remote server. Fail closed at load.
+	if c.Agents.LocalEndpoint != "" && !agentcli.IsLocalEndpoint(c.Agents.LocalEndpoint) {
+		return fmt.Errorf("agents.local_endpoint %q must be a local/host-gateway http(s) URL (host.docker.internal or loopback); Pi reaches only the local backend", c.Agents.LocalEndpoint)
 	}
 	for _, srv := range c.Realtime.ICEServers {
 		if len(srv.URLs) == 0 {

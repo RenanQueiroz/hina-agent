@@ -147,6 +147,15 @@ func cmdServer(args []string) error {
 	// installed. SetSandbox builds the tool Router only when [sandbox] is enabled.
 	sandboxRunner, workspaces := buildSandbox(a)
 	srv.SetSandbox(buildVault(a), workspaces, sandboxRunner)
+	// Phase 8 callable agents (Codex/Claude/Cursor/Pi) are built inside SetSandbox
+	// (they reuse the sandbox Router + vault), gated on [agents].enabled + the sandbox
+	// stack being present. Pi additionally needs the Phase 11 local endpoint.
+	if a.cfg.Agents.Enabled {
+		a.log.Info("callable agents", "enabled", true,
+			"sandbox_enabled", a.cfg.Sandbox.Enabled,
+			"network_isolated", a.cfg.Sandbox.NetworkIsolated,
+			"pi_endpoint", a.cfg.Agents.LocalEndpoint != "")
+	}
 
 	srv.SetReady(true)
 

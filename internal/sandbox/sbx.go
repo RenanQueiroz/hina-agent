@@ -208,13 +208,15 @@ func (r *CLIRunner) Run(ctx context.Context, spec RunSpec) (RunResult, error) {
 	stderrPath, seErr := r.writeCapture(sandboxID, "stderr", errRed)
 
 	res := RunResult{
-		SandboxID:  sandboxID,
-		Stdout:     inlineOutput(outRed, outBuf.Truncated()),
-		Stderr:     inlineOutput(errRed, errBuf.Truncated()),
-		StdoutPath: stdoutPath,
-		StderrPath: stderrPath,
-		Duration:   time.Since(start),
-		TimedOut:   timedOut,
+		SandboxID:       sandboxID,
+		Stdout:          inlineOutput(outRed, outBuf.Truncated()),
+		Stderr:          inlineOutput(errRed, errBuf.Truncated()),
+		StdoutPath:      stdoutPath,
+		StderrPath:      stderrPath,
+		StdoutTruncated: outBuf.Truncated(),
+		StderrTruncated: errBuf.Truncated(),
+		Duration:        time.Since(start),
+		TimedOut:        timedOut,
 	}
 	// A capture-write failure must not be swallowed: the command already ran, so
 	// record it (logged here, folded into the audit row by the Router) rather than
@@ -416,7 +418,7 @@ func inlineOutput(b []byte, truncated bool) string {
 	}
 	out := string(b)
 	if truncated {
-		out += "\n…[output truncated]"
+		out += inlineTruncSuffix
 	}
 	return out
 }

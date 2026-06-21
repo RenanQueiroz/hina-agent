@@ -29,8 +29,8 @@ documented unattended-Automation decryption boundary, etc.) is described in
 [`plans/hina-agent-plan.md`](plans/hina-agent-plan.md) and
 [`plans/research-findings.md`](plans/research-findings.md).
 
-As of Phase 7 the per-user boundary is implemented (`internal/sandbox`,
-`internal/vault`):
+As of Phase 8 the per-user boundary (`internal/sandbox`, `internal/vault`) and the
+callable-agent layer (`internal/agentcli`, `internal/agentauth`) are implemented:
 
 - **Secret vault.** Envelope encryption — a per-secret AES-256-GCM data key wraps
   each value and is itself wrapped by a local master key
@@ -75,3 +75,29 @@ As of Phase 7 the per-user boundary is implemented (`internal/sandbox`,
   never builds a raw host command line, and host filesystem/env/other users' data
   never reach a model response. The vault + sandbox tools are gated off on Windows
   until Phase 12 validates owner-only ACL/DPAPI enforcement.
+- **Callable agents (auth broker + agent-state).** A user authenticates a coding-agent
+  CLI (Codex/Claude/Cursor) through the web UI — an interactive login streamed from a
+  short-lived `sbx` auth container, or an API key/token. The resulting credential
+  material (a browser/subscription credential store, or the key) is treated as **the
+  same secret material as a vaulted secret**: envelope-encrypted **agent-state**, an
+  owner-private file on disk, **never in the database**, mounted/injected only into
+  that one user's containers, and re-encrypted after a run (tokens refresh). The DB
+  holds only a metadata `agent_profiles` row recording the auth-profile **type**
+  (`browser_state`/`api_key`/`oauth_token`/`local_llamacpp`) — never a token, URL, or
+  device code; the streamed login view is sanitized and the admin UI shows only a
+  coarse status. A model-requested `agent.<provider>.run` reuses the Phase 7 boundary
+  (per-user lock, approval, output/audit redaction over the injected key, workspace
+  quota, audit log) and runs the agent **headlessly inside `sbx`** — never on the host
+  — with the agent-state archived/extracted through a **tar-slip-hardened** archiver
+  (regular files only, no symlinks, names that escape the target rejected, size
+  capped). Because an agent run carries powerful provider credentials **and** needs
+  network egress to its provider (which Hina cannot gate per-container yet — that is
+  the host-inference gateway's job, Phase 8/11), agent runs are **refused unless
+  `[sandbox] network_isolated = true`** (the operator's assertion that the container's
+  egress is controlled). This is **fail closed by default**. The prompt and other
+  typed arguments are passed argv-first (no shell) and a run is refused if any argument
+  carries a vaulted secret value (it would appear on the host `sbx` command line). As
+  with raw tools, granting an agent a credential means trusting that agent with it.
+  **Pi** is the local-only, account-free agent: it targets only Hina's host-inference
+  proxy (never a cloud provider) and stays disabled until Phase 11 provides that
+  endpoint. The whole callable-agent layer is gated off on Windows until Phase 12.

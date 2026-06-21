@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/RenanQueiroz/hina-agent/internal/agent"
+	"github.com/RenanQueiroz/hina-agent/internal/agentauth"
 	"github.com/RenanQueiroz/hina-agent/internal/asr"
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
 	"github.com/RenanQueiroz/hina-agent/internal/config"
@@ -56,6 +57,10 @@ type Server struct {
 	router     *sandbox.Router
 	workspaces *sandbox.WorkspaceManager
 	approvals  *approvalRegistry
+
+	// Phase 8 callable agents (installed via SetAgents; nil until then).
+	broker      *agentauth.Broker
+	agentRouter *sandbox.AgentRouter
 
 	turnMu      sync.Mutex      // guards activeTurns + pendingInterrupts
 	activeTurns map[string]bool // conversationID -> a turn is in flight
@@ -109,6 +114,59 @@ func (s *Server) SetSandbox(v *vault.Vault, ws *sandbox.WorkspaceManager, runner
 		QuotaBytes:      s.cfg.Sandbox.WorkspaceQuotaBytes(),
 		NetworkIsolated: s.cfg.Sandbox.NetworkIsolated,
 		Log:             s.log,
+	})
+	s.setupAgents(v, ws, runner)
+}
+
+// setupAgents builds the Phase 8 callable-agent broker + run router on top of the
+// sandbox Router (so an agent run shares the same per-user lock, approval, secret
+// redaction, quota, and audit boundary). Only built when [agents] is enabled and the
+// sandbox stack is present; otherwise the agent endpoints report unavailable. The
+// vault gating (Windows / master-key failure) flows through automatically: when v is
+// nil this is never reached.
+func (s *Server) setupAgents(v *vault.Vault, ws *sandbox.WorkspaceManager, runner sandbox.Runner) {
+	if !s.cfg.Agents.Enabled || s.router == nil {
+		return
+	}
+	// A SHORT per-user credential lock shared by the broker and the AgentRouter's
+	// refreshed-state persist. It is deliberately NOT the long run lock, so a logout /
+	// key-rotation is prompt (not blocked for an in-flight run's whole duration) while
+	// the persist-vs-delete race stays closed.
+	credLocks := &sandbox.UserLocker{}
+	// In-flight run registry shared with the broker so a logout cancels a run holding
+	// (or about to launch with) the revoked credential.
+	runs := &sandbox.RunRegistry{}
+	s.agentRouter = s.router.NewAgentRouter(sandbox.AgentRouterConfig{
+		State:            v,
+		Profiles:         s.store,
+		LocalEndpoint:    s.cfg.Agents.LocalEndpoint,
+		AllowedProviders: s.cfg.Agents.Providers,
+		CredLocks:        credLocks,
+		Runs:             runs,
+		Limits: sandbox.Limits{
+			CPUs:    s.cfg.Sandbox.CPUs,
+			Memory:  s.cfg.Sandbox.Memory,
+			PIDs:    s.cfg.Sandbox.PIDs,
+			Timeout: s.cfg.Agents.TimeoutOr(10 * time.Minute),
+		},
+	})
+	s.broker = agentauth.New(agentauth.Config{
+		Runner: runner,
+		// The auth container gets the same kit + CPU/memory/PID caps as a normal run.
+		Factory: agentauth.NewCLIFactory(runner, s.cfg.Sandbox.Kit, sandbox.Limits{
+			CPUs:   s.cfg.Sandbox.CPUs,
+			Memory: s.cfg.Sandbox.Memory,
+			PIDs:   s.cfg.Sandbox.PIDs,
+		}),
+		Scratch:         ws,
+		State:           v,
+		Profiles:        s.store,
+		NetworkIsolated: s.cfg.Sandbox.NetworkIsolated,
+		// The SHORT cred lock (not the run lock): logout/SetKey/login serialize with a
+		// run's refreshed-state persist + launch fence without blocking on the run itself.
+		Locks: credLocks,
+		Runs:  runs,
+		Log:   s.log,
 	})
 }
 
@@ -253,6 +311,16 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("PUT /api/v1/sandbox/secrets/{id}", s.requireUser(s.handleUpdateSecret))
 	mux.Handle("DELETE /api/v1/sandbox/secrets/{id}", s.requireUser(s.handleDeleteSecret))
 
+	// Callable agents (Phase 8): catalog, per-provider profile (key/logout), and the
+	// interactive login broker (start/stream/input/cancel).
+	mux.Handle("GET /api/v1/agents", s.requireUser(s.handleAgentCatalog))
+	mux.Handle("POST /api/v1/agents/{provider}/key", s.requireUser(s.handleSetAgentKey))
+	mux.Handle("DELETE /api/v1/agents/{provider}", s.requireUser(s.handleAgentLogout))
+	mux.Handle("POST /api/v1/agents/{provider}/login", s.requireUser(s.handleStartAgentLogin))
+	mux.Handle("GET /api/v1/agents/login/{sessionID}/events", s.requireUser(s.handleAgentLoginEvents))
+	mux.Handle("POST /api/v1/agents/login/{sessionID}/input", s.requireUser(s.handleAgentLoginInput))
+	mux.Handle("POST /api/v1/agents/login/{sessionID}/cancel", s.requireUser(s.handleAgentLoginCancel))
+
 	// Admin routes.
 	mux.Handle("GET /api/v1/admin/users", s.requireAdmin(s.handleListUsers))
 	mux.Handle("GET /api/v1/admin/llm", s.requireAdmin(s.handleAdminLLM))
@@ -260,6 +328,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/admin/logs", s.requireAdmin(s.handleAdminLogs))
 	mux.Handle("GET /api/v1/admin/rtc", s.requireAdmin(s.handleAdminRTC))
 	mux.Handle("GET /api/v1/admin/sandbox", s.requireAdmin(s.handleAdminSandbox))
+	mux.Handle("GET /api/v1/admin/agents", s.requireAdmin(s.handleAdminAgents))
 
 	// SPA: the embedded web client serves all remaining paths (more specific
 	// /healthz, /readyz, /api/v1/* patterns take precedence).

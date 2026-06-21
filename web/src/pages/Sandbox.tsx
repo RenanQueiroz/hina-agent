@@ -9,6 +9,7 @@ import type {
 import { api, ApiError } from "../lib/api";
 import { humanTool, isValidEnvName, toggleTool } from "../lib/sandbox";
 import { Button, Card, Input, Spinner } from "../components/ui";
+import { AgentsCard } from "../components/AgentsCard";
 
 // SandboxPage is the per-user Sandbox Environment surface: the secret vault and
 // the policy (allowed tools, network allow-list, secret grants) that constrains
@@ -24,6 +25,7 @@ export function SandboxPage() {
         </p>
       </div>
       <SecretsCard />
+      <AgentsCard />
       <EnvironmentCard />
     </div>
   );

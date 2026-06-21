@@ -61,7 +61,11 @@ export function humanTool(tool: string): string {
       return "Write a file";
     case "http_fetch":
       return "Fetch a URL";
-    default:
+    default: {
+      // Callable-agent run tools: "agent.codex.run" -> "Run the codex agent".
+      const m = /^agent\.(.+)\.run$/.exec(tool);
+      if (m) return `Run the ${m[1]} agent`;
       return tool;
+    }
   }
 }

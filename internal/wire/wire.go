@@ -271,6 +271,91 @@ type SandboxRunInfo struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// --- Callable agents (Phase 8) ---
+
+// AgentInfo is one callable coding-agent's catalog entry for a user: its static
+// capability plus that user's profile state and current eligibility to run. It
+// never carries a credential — only the auth-profile TYPE.
+type AgentInfo struct {
+	Provider           string   `json:"provider"`
+	DisplayName        string   `json:"display_name"`
+	AuthTypes          []string `json:"auth_types"`   // profile types the user may configure
+	BrowserAuth        bool     `json:"browser_auth"` // supports interactive login
+	LocalOnly          bool     `json:"local_only"`   // Pi
+	ToolName           string   `json:"tool_name"`    // routable tool, e.g. "agent.codex.run"
+	Configured         bool     `json:"configured"`   // a profile exists
+	ConfiguredAuthType string   `json:"configured_auth_type,omitempty"`
+	Status             string   `json:"status,omitempty"` // profile status (authenticated/...)
+	Runnable           bool     `json:"runnable"`         // eligible to be called right now
+	Reason             string   `json:"reason,omitempty"` // why not runnable / not configurable
+}
+
+// AgentCatalog is the GET /agents response: the per-user agent list + the
+// server-level gates that decide eligibility.
+type AgentCatalog struct {
+	Enabled         bool        `json:"enabled"`                // [sandbox] tool execution on
+	BrowserAuth     bool        `json:"browser_auth_available"` // interactive login usable (sbx present)
+	NetworkIsolated bool        `json:"network_isolated"`       // operator asserted controlled egress
+	Agents          []AgentInfo `json:"agents"`
+}
+
+// SetAgentKey is the POST /agents/{provider}/key body (configure an API-key/token
+// profile). The value is write-only — never returned.
+type SetAgentKey struct {
+	AuthType string `json:"auth_type"` // api_key | oauth_token
+	Value    string `json:"value"`
+}
+
+// StartAgentLogin is the POST /agents/{provider}/login body.
+type StartAgentLogin struct {
+	DeviceAuth bool `json:"device_auth"` // use the device/paste-code flow
+}
+
+// AgentLoginStarted is the POST /agents/{provider}/login response.
+type AgentLoginStarted struct {
+	SessionID string `json:"session_id"`
+}
+
+// AgentLoginInput is the POST /agents/login/{id}/input body (a pasted code/line).
+type AgentLoginInput struct {
+	Data string `json:"data"`
+}
+
+// AgentLoginHint is an actionable item detected in login output (URL/code/prompt).
+type AgentLoginHint struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+// AgentLoginFrame is one streamed login event over the login SSE channel. It never
+// carries a persisted credential — only the transient live view.
+type AgentLoginFrame struct {
+	Type  string          `json:"type"` // output | hint | done
+	Text  string          `json:"text,omitempty"`
+	Hint  *AgentLoginHint `json:"hint,omitempty"`
+	OK    bool            `json:"ok,omitempty"`
+	Error string          `json:"error,omitempty"`
+}
+
+// AdminAgentProfile is one user's coarse agent-profile status for the admin view —
+// never a token/URL/code.
+type AdminAgentProfile struct {
+	UserID    string    `json:"user_id"`
+	Username  string    `json:"username"`
+	Provider  string    `json:"provider"`
+	AuthType  string    `json:"auth_type"`
+	Status    string    `json:"status"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// AdminAgents is the GET /admin/agents response.
+type AdminAgents struct {
+	Available   bool                `json:"available"`
+	BrowserAuth bool                `json:"browser_auth_available"`
+	Reason      string              `json:"reason,omitempty"`
+	Profiles    []AdminAgentProfile `json:"profiles"`
+}
+
 // ErrorResponse is the shape of all error bodies.
 type ErrorResponse struct {
 	Error string `json:"error"`

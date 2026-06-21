@@ -57,9 +57,72 @@ export function AdminPage() {
       </Card>
 
       <SandboxPanel />
+      <AgentsPanel />
       <LiveSessionsPanel />
       <LogsPanel />
     </div>
+  );
+}
+
+// AgentsPanel shows the Phase 8 callable-agent availability and each user's coarse
+// profile status — never a token, URL, or device code.
+function AgentsPanel() {
+  const ag = useQuery({
+    queryKey: ["admin", "agents"],
+    queryFn: api.adminAgents,
+    refetchInterval: 5000,
+  });
+  return (
+    <Card className="p-4">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">
+        Callable agents
+      </h2>
+      {ag.isLoading ? (
+        <Spinner />
+      ) : (
+        <>
+          <dl className="mb-4 grid grid-cols-[160px_1fr] gap-y-1 text-sm">
+            <dt className="text-zinc-500">Status</dt>
+            <dd>
+              {ag.data?.available ? "available" : "unavailable"}
+              {ag.data?.reason ? (
+                <span className="text-zinc-400"> — {ag.data.reason}</span>
+              ) : null}
+            </dd>
+            <dt className="text-zinc-500">Browser login</dt>
+            <dd>{ag.data?.browser_auth_available ? "available" : "unavailable"}</dd>
+          </dl>
+          {(ag.data?.profiles ?? []).length === 0 ? (
+            <p className="text-sm text-zinc-400">No agents configured by any user.</p>
+          ) : (
+            <table className="w-full text-left text-xs">
+              <thead className="text-zinc-500">
+                <tr>
+                  {["User", "Agent", "Auth type", "Status"].map((h) => (
+                    <th key={h} className="py-1 pr-3 font-medium">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(ag.data?.profiles ?? []).map((p) => (
+                  <tr
+                    key={`${p.user_id}:${p.provider}`}
+                    className="border-t border-zinc-100 dark:border-zinc-800"
+                  >
+                    <td className="py-1.5 pr-3">{p.username}</td>
+                    <td className="py-1.5 pr-3">{p.provider}</td>
+                    <td className="py-1.5 pr-3">{p.auth_type}</td>
+                    <td className="py-1.5 pr-3">{p.status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+    </Card>
   );
 }
 

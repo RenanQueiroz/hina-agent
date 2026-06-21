@@ -1,10 +1,12 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,14 +41,18 @@ func (s *stubRunner) Run(_ context.Context, spec RunSpec) (RunResult, error) {
 }
 
 type stubApprover struct {
-	approve bool
-	gotReq  ApprovalRequest
+	approve   bool
+	gotReq    ApprovalRequest
+	onApprove func() // invoked during Approve, before the decision returns (e.g. to rotate a credential mid-approval)
 }
 
 func (s *stubApprover) Approve(_ context.Context, req ApprovalRequest, onRegistered func()) (bool, error) {
 	s.gotReq = req
 	if onRegistered != nil {
 		onRegistered()
+	}
+	if s.onApprove != nil {
+		s.onApprove()
 	}
 	return s.approve, nil
 }
@@ -82,6 +88,7 @@ type routerKit struct {
 	vault  *vault.Vault
 	store  *store.Store
 	userID string
+	logBuf *bytes.Buffer
 }
 
 func newRouterKit(t *testing.T, approval string) *routerKit {
@@ -112,11 +119,13 @@ func newRouterKit(t *testing.T, approval string) *routerKit {
 	runner := &stubRunner{result: RunResult{ExitCode: 0, Stdout: "ok", SandboxID: "sbx_1"}}
 	apr := &stubApprover{approve: true}
 	bus := &recordBus{}
+	logBuf := &bytes.Buffer{}
 	r := NewRouter(RouterConfig{
 		Runner: runner, Secrets: v, Workspaces: ws, Store: st, Bus: bus,
 		Approver: apr, Approval: approval, NetworkIsolated: true,
+		Log: slog.New(slog.NewTextHandler(logBuf, nil)),
 	})
-	return &routerKit{router: r, runner: runner, apr: apr, bus: bus, vault: v, store: st, userID: u.ID}
+	return &routerKit{router: r, runner: runner, apr: apr, bus: bus, vault: v, store: st, userID: u.ID, logBuf: logBuf}
 }
 
 func (k *routerKit) setEnv(t *testing.T, env Environment) {

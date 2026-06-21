@@ -303,6 +303,20 @@ approval = "always"      # always (prompt per tool call) | auto (run without pro
 #   (Balanced/Locked-Down). Hina can't gate a raw shell command's network, so granted
 #   secrets are injected into runs ONLY when this is true — fail closed by default.
 
+[agents]
+# Callable coding-agent CLIs (Phase 8): authenticate Codex/Claude/Cursor through the
+# web UI (browser login or API key) and call them as typed, sandboxed tools
+# (agent.<provider>.run). Each run executes headlessly INSIDE the per-user sbx
+# sandbox with the user's encrypted agent-state mounted. Builds on [sandbox]: needs
+# enabled=true above, a working sbx, AND network_isolated=true (an agent run carries
+# provider credentials and needs egress Hina can't gate per-container yet — fail
+# closed). Pi is the local-only agent and stays unavailable until the Phase 11
+# managed llama.cpp backend provides local_endpoint. Off by default.
+enabled = false
+# timeout = "10m"            # per-run wall-clock cap
+# providers = ["codex", "claude", "cursor"]  # allow-list (empty = all built-in)
+# local_endpoint = ""        # Pi's host-inference proxy base URL (Phase 11); empty = Pi off
+
 # [paths]  # optional overrides of the OS-resolved app directories
 # data_dir = "/var/lib/hina"
 # cache_dir = "/var/cache/hina"

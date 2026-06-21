@@ -28,12 +28,24 @@ func toolScopeFrom(ctx context.Context) (sandbox.Scope, bool) {
 // carrying a scope. It returns the failure inside ToolResult.Err (so the model can
 // recover) except for a context cancellation, which propagates as an interrupt.
 func (s *Server) toolHook(ctx context.Context, call agent.ToolCall) (agent.ToolResult, error) {
-	if !s.cfg.Sandbox.Enabled || s.router == nil {
-		return agent.ToolResult{Err: "sandbox tool execution is disabled on this server"}, nil
-	}
 	scope, ok := toolScopeFrom(ctx)
 	if !ok || scope.UserID == "" {
 		return agent.ToolResult{Err: "tool execution has no user scope"}, nil
+	}
+	// A callable-agent run (agent.<provider>.run) routes to the AgentRouter; every
+	// other tool (shell/file/HTTP) routes to the raw sandbox Router.
+	if sandbox.Handles(call.Name) {
+		if s.agentRouter == nil {
+			return agent.ToolResult{Err: "callable agents are disabled on this server"}, nil
+		}
+		res, err := s.agentRouter.Handle(ctx, scope, sandbox.ToolCall{ID: call.ID, Name: call.Name, Arguments: call.Arguments})
+		if err != nil {
+			return agent.ToolResult{}, err
+		}
+		return agent.ToolResult{Content: res.Content, Err: res.Err}, nil
+	}
+	if !s.cfg.Sandbox.Enabled || s.router == nil {
+		return agent.ToolResult{Err: "sandbox tool execution is disabled on this server"}, nil
 	}
 	res, err := s.router.Handle(ctx, scope, sandbox.ToolCall{ID: call.ID, Name: call.Name, Arguments: call.Arguments})
 	if err != nil {

@@ -73,6 +73,18 @@ func TestValidateRejectsDivergentAssetsDir(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsRemotePiEndpoint(t *testing.T) {
+	c := Default()
+	c.Agents.LocalEndpoint = "http://evil.example.com/v1"
+	if err := c.Validate(); err == nil {
+		t.Fatal("a non-local agents.local_endpoint must be rejected (Pi is local-only)")
+	}
+	c.Agents.LocalEndpoint = "http://host.docker.internal:8081/v1"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a local agents.local_endpoint should validate: %v", err)
+	}
+}
+
 // TestValidateCompatBaseURL locks the fail-closed rule: the local openai-compat
 // provider requires an explicit base_url (never silently routes to cloud).
 func TestValidateCompatBaseURL(t *testing.T) {

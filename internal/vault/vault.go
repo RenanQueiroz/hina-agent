@@ -120,22 +120,33 @@ func (v *Vault) Get(ctx context.Context, userID, secretID string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("vault: read blob: %w", err)
 	}
+	plain, err := v.openEnvelope(raw)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+// openEnvelope decrypts an on-disk envelope: it unwraps the per-blob DEK with the
+// master key, then decrypts the value with the DEK. Shared by secrets and
+// agent-state so the crypto lives in exactly one place.
+func (v *Vault) openEnvelope(raw []byte) ([]byte, error) {
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return "", fmt.Errorf("vault: decode blob: %w", err)
+		return nil, fmt.Errorf("vault: decode blob: %w", err)
 	}
 	if env.Version != envelopeVersion {
-		return "", fmt.Errorf("vault: unsupported envelope version %d", env.Version)
+		return nil, fmt.Errorf("vault: unsupported envelope version %d", env.Version)
 	}
 	dek, err := v.master.Open(nil, env.DEKNonce, env.WrappedDEK, nil)
 	if err != nil {
-		return "", fmt.Errorf("vault: unwrap dek: %w", err)
+		return nil, fmt.Errorf("vault: unwrap dek: %w", err)
 	}
 	plain, err := openWith(dek, env.ValueNonce, env.Value)
 	if err != nil {
-		return "", fmt.Errorf("vault: decrypt value: %w", err)
+		return nil, fmt.Errorf("vault: decrypt value: %w", err)
 	}
-	return string(plain), nil
+	return plain, nil
 }
 
 // List returns a user's secret metadata (no values).
@@ -171,36 +182,49 @@ func (v *Vault) Delete(ctx context.Context, userID, secretID string) error {
 	return v.store.DeleteSecretMeta(ctx, userID, secretID)
 }
 
-// writeBlob encrypts value and writes its envelope atomically (temp + rename) with
-// owner-only permissions.
+// writeBlob encrypts value and writes its envelope atomically with owner-only
+// permissions to the secret's blob path.
 func (v *Vault) writeBlob(userID, secretID, value string) error {
-	dek := make([]byte, dekLen)
-	if _, err := rand.Read(dek); err != nil {
-		return fmt.Errorf("vault: generate dek: %w", err)
-	}
-	valNonce, valCT, err := sealWith(dek, []byte(value))
+	path, err := v.blobPath(userID, secretID)
 	if err != nil {
 		return err
 	}
+	return v.writeEnvelope(path, []byte(value))
+}
+
+// sealEnvelope envelope-encrypts plaintext: a fresh random DEK encrypts the value,
+// and the DEK is wrapped by the master key. Shared by secrets and agent-state.
+func (v *Vault) sealEnvelope(plaintext []byte) ([]byte, error) {
+	dek := make([]byte, dekLen)
+	if _, err := rand.Read(dek); err != nil {
+		return nil, fmt.Errorf("vault: generate dek: %w", err)
+	}
+	valNonce, valCT, err := sealWith(dek, plaintext)
+	if err != nil {
+		return nil, err
+	}
 	dekNonce := make([]byte, v.master.NonceSize())
 	if _, err := rand.Read(dekNonce); err != nil {
-		return fmt.Errorf("vault: dek nonce: %w", err)
+		return nil, fmt.Errorf("vault: dek nonce: %w", err)
 	}
 	wrapped := v.master.Seal(nil, dekNonce, dek, nil)
-
-	env := envelope{
+	raw, err := json.Marshal(envelope{
 		Version:    envelopeVersion,
 		WrappedDEK: wrapped,
 		DEKNonce:   dekNonce,
 		ValueNonce: valNonce,
 		Value:      valCT,
-	}
-	raw, err := json.Marshal(env)
+	})
 	if err != nil {
-		return fmt.Errorf("vault: encode blob: %w", err)
+		return nil, fmt.Errorf("vault: encode blob: %w", err)
 	}
+	return raw, nil
+}
 
-	path, err := v.blobPath(userID, secretID)
+// writeEnvelope seals plaintext and writes it atomically (temp + rename) with
+// owner-only permissions to path, creating the parent dir owner-private.
+func (v *Vault) writeEnvelope(path string, plaintext []byte) error {
+	raw, err := v.sealEnvelope(plaintext)
 	if err != nil {
 		return err
 	}

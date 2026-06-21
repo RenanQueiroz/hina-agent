@@ -1,9 +1,12 @@
 // Typed API client. Shapes come from api.gen.ts (generated from internal/wire).
 import type {
+  AdminAgents,
   AdminLLMInfo,
   AdminRuntime,
   AdminSandbox,
   AdminUser,
+  AgentCatalog,
+  AgentLoginStarted,
   ConfigInfo,
   Conversation,
   LoginResponse,
@@ -110,6 +113,33 @@ export const api = {
     }),
   deleteSecret: (id: string) =>
     req<void>(`/api/v1/sandbox/secrets/${id}`, { method: "DELETE" }),
+
+  // Callable agents (Phase 8). The catalog merges static capability + per-user
+  // profile state + eligibility; credentials are write-only (never returned).
+  adminAgents: () => req<AdminAgents>("/api/v1/admin/agents"),
+  listAgents: () => req<AgentCatalog>("/api/v1/agents"),
+  setAgentKey: (provider: string, authType: string, value: string) =>
+    req<void>(`/api/v1/agents/${provider}/key`, {
+      method: "POST",
+      body: JSON.stringify({ auth_type: authType, value }),
+    }),
+  logoutAgent: (provider: string) =>
+    req<void>(`/api/v1/agents/${provider}`, { method: "DELETE" }),
+  startAgentLogin: (provider: string, deviceAuth: boolean) =>
+    req<AgentLoginStarted>(`/api/v1/agents/${provider}/login`, {
+      method: "POST",
+      body: JSON.stringify({ device_auth: deviceAuth }),
+    }),
+  sendAgentLoginInput: (sessionId: string, data: string) =>
+    req<void>(`/api/v1/agents/login/${sessionId}/input`, {
+      method: "POST",
+      body: JSON.stringify({ data }),
+    }),
+  cancelAgentLogin: (sessionId: string) =>
+    req<void>(`/api/v1/agents/login/${sessionId}/cancel`, { method: "POST" }),
+  // The login output stream is an EventSource at this URL (AgentLoginFrame events).
+  agentLoginEventsUrl: (sessionId: string) =>
+    `/api/v1/agents/login/${sessionId}/events`,
 
   // Approve or deny a pending tool call raised in a conversation.
   decideToolApproval: (conversationId: string, callId: string, approve: boolean) =>

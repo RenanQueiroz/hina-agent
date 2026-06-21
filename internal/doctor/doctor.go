@@ -99,6 +99,27 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 		}
 	}
 
+	// Callable agents (Phase 8): the Codex/Claude/Cursor/Pi CLIs run INSIDE the sbx
+	// container (not on the host PATH), so report the feature gate rather than probing
+	// host binaries. Eligibility mirrors the run path: [agents] enabled + a usable sbx
+	// + the controlled-egress assertion; Pi additionally needs the Phase 11 backend.
+	switch {
+	case runtime.GOOS == "windows":
+		r.add("callable agents", "unavailable", "gated to Phase 12 on Windows (vault/sandbox not yet enforced)")
+	case !cfg.Agents.Enabled:
+		r.add("callable agents", "unavailable", "disabled: set [agents] enabled=true (needs [sandbox] + a pinned sbx)")
+	case !cfg.Sandbox.Enabled || !sb.Available:
+		r.add("callable agents", "unavailable", "need [sandbox] enabled with a working sbx (agent CLIs run inside sbx)")
+	case !cfg.Sandbox.NetworkIsolated:
+		r.add("callable agents", "warn", "set [sandbox] network_isolated=true to allow agent runs (controlled egress; fail closed)")
+	default:
+		detail := "Codex/Claude/Cursor runnable when authenticated"
+		if cfg.Agents.LocalEndpoint == "" {
+			detail += "; Pi unavailable (needs the Phase 11 local LLM backend)"
+		}
+		r.add("callable agents", "ok", detail)
+	}
+
 	// WebRTC voice bridge — pure Go (Pion), so always available with no native
 	// toolchain. Hands-on browser loopback is validated in Phase 12.
 	r.add("webrtc voice bridge (pion)", "ok", "pure-Go media bridge; no native toolchain")

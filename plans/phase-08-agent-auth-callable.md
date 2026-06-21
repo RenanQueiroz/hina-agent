@@ -1,8 +1,43 @@
 # Phase 8 — Agent auth broker + callable agent adapters (Codex / Claude / Cursor / Pi)
 
-Status: ready after Phase 7 (Pi also needs Phase 11).
+Status: **implemented** (Linux/macOS scope; Pi gated on Phase 11, Windows browser-auth on Phase 12).
 Depends on: Phase 7 (sandboxes + secret/agent-state storage); Phase 11 for the Pi adapter (the managed host llama.cpp endpoint it targets).
 Unblocks: Phase 9 (Automations spawn callable agents).
+
+## Implementation notes (what landed)
+
+The full vertical slice is implemented and tested the way Phase 7 was — without the
+external CLIs present (they live inside the `sbx` container image, like `sbx` itself):
+
+- **`internal/agentcli`** — pure, versioned adapters (codex/claude/cursor/pi): the
+  B7-verified `exec`/`login`/`status` argv + tolerant output parsers → a normalized
+  `AgentRunResult`. Fixture-tested; **re-verify each CLI's flags on a host that has it
+  before trusting in production** (the parsers + `VersionArgs` are the drift guard).
+- **`internal/agentauth`** — the auth broker: interactive login in a short-lived `sbx`
+  auth container (`sbx run -it`, host attached by pipes; **no host PTY needed** — the
+  container TTY + the mandatory device/paste-code fallback cover it), sanitized output
+  streaming with URL/device-code/paste-prompt detection, status-command confirmation,
+  API-key/token profiles, logout. Pure detection/sanitization + the session state
+  machine are fully tested with a fake session factory.
+- **`internal/vault` + `internal/store`** — per-provider encrypted **agent-state** (a
+  tar of the credential store, or the key) under the secret envelope, plus a
+  metadata-only `agent_profiles` row (auth-profile type, never a credential).
+- **`internal/sandbox` `AgentRouter`** — built from the tool Router (shared lock /
+  approval / redaction / quota / audit); resolves the profile, mounts the decrypted
+  store or injects the key, runs the agent inside `sbx`, re-encrypts a refreshed store,
+  parses + redacts the result. **Fails closed unless `[sandbox] network_isolated`** (an
+  agent run carries credentials and needs egress Hina can't gate per-container yet).
+  A **tar-slip-hardened** archiver moves agent-state in/out.
+- **`internal/httpapi` + `web/`** — `/agents` catalog + eligibility, key/login broker
+  endpoints (start / SSE / paste-input / cancel) + logout, admin coarse status; a
+  **Coding agents** card on the Sandbox page (streamed login dialog + API-key form).
+- **`[agents]` config**, `hina doctor` callable-agents check, and the agent loop routing
+  `agent.*` tool calls to the AgentRouter.
+
+**Deferred:** the **MCP facade** (scope item 5 — optional); the **Pi** adapter is built
+but gated unavailable until Phase 11 wires the managed llama.cpp host-inference proxy;
+real-CLI/container validation is for an `sbx`-equipped host; Windows browser-auth →
+Phase 12.
 
 ## Goal
 

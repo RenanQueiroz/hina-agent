@@ -112,9 +112,15 @@ type RunResult struct {
 	Stderr     string
 	StdoutPath string
 	StderrPath string
-	Duration   time.Duration
-	TimedOut   bool
-	Err        error
+	// Stdout/StderrTruncated report whether the captured stream hit the capture cap.
+	// A post-capture redactor (e.g. for tokens minted DURING the run) needs this to
+	// re-apply the truncation-boundary margin, since a value straddling the cap can't
+	// be matched by exact redaction once its tail is cut.
+	StdoutTruncated bool
+	StderrTruncated bool
+	Duration        time.Duration
+	TimedOut        bool
+	Err             error
 	// CaptureErr is set when the command ran but its output could not be persisted
 	// to disk (unwritable dir / full disk). The run's side effects happened, so this
 	// is recorded in the audit row rather than silently lost — the forensic gap is

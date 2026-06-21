@@ -10,7 +10,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/RenanQueiroz/hina-agent/internal/events"
@@ -122,18 +121,19 @@ type RouterConfig struct {
 // `sbx` sandbox with that user's Sandbox Environment policy, granted secrets, an
 // approval gate, and an audit-log entry — never on the host.
 type Router struct {
-	cfg       RouterConfig
-	log       *slog.Logger
-	userLocks sync.Map // userID -> *sync.Mutex; serializes a user's tool runs
+	cfg   RouterConfig
+	log   *slog.Logger
+	locks *UserLocker // shared with the AgentRouter + auth broker so a user's runs serialize
 }
 
 // lockUser acquires the per-user run lock, returning the unlock func.
 func (r *Router) lockUser(userID string) func() {
-	v, _ := r.userLocks.LoadOrStore(userID, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	return r.locks.Lock(userID)
 }
+
+// Locks returns the shared per-user locker so the auth broker can serialize its
+// agent-state/profile writes (SetKey/logout) with agent runs on the same lock.
+func (r *Router) Locks() *UserLocker { return r.locks }
 
 // NewRouter builds a Router. Approval defaults to ApprovalAlways (fail safe).
 func NewRouter(cfg RouterConfig) *Router {
@@ -143,7 +143,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.Approval == "" {
 		cfg.Approval = ApprovalAlways
 	}
-	return &Router{cfg: cfg, log: cfg.Log}
+	return &Router{cfg: cfg, log: cfg.Log, locks: &UserLocker{}}
 }
 
 // Handle routes one tool call for a user/conversation and returns the result fed
