@@ -33,7 +33,7 @@ func TestManifestPlatform(t *testing.T) {
 		t.Fatalf("windows/amd64 ORT availability = %v, but gate is %v", ok, WindowsLocalVoiceGated)
 	}
 	if _, unsup := Manifest("windows", "amd64"); unsup == !WindowsLocalVoiceGated {
-		t.Fatal("windows/amd64 manifest must flag ORT unsupported while gated to Phase 11")
+		t.Fatal("windows/amd64 manifest must flag ORT unsupported while gated to Phase 12")
 	}
 	list, unsupported := Manifest("linux", "amd64")
 	if unsupported {

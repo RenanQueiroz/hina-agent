@@ -25,11 +25,11 @@ Library/version/model facts are fixed in [`research-findings.md` B1–B2](resear
 ### Explicitly out (deferred)
 - ASR (Phase 5) — but the runtime manager built here is the one Phase 5 reuses.
 - VAD/interruption/echo (Phase 6) — TTS here just plays to completion; mid-utterance truncation is Phase 6 (the playback cursor from Phase 3 is ready for it).
-- **Windows local TTS stays disabled** until the Phase 11 ORT-DLL gate passes (Nemotron+Supertonic loading via the `yalue` binding from an app-managed DLL on a real Windows host). On Windows, `hina doctor` reports local TTS unavailable; cloud TTS still works.
+- **Windows local TTS stays disabled** until the Phase 12 ORT-DLL gate passes (Nemotron+Supertonic loading via the `yalue` binding from an app-managed DLL on a real Windows host). On Windows, `hina doctor` reports local TTS unavailable; cloud TTS still works.
 - Cloud TTS adapters (OpenAI/Gemini) — keep them available through the cloud provider layer, but this phase is about the local path.
 
 ## Windows posture
-Write the adapter and runtime manager cross-platform now; the ORT DLL loading path is coded (with the Windows `onnxruntime.dll` discovery via `SetSharedLibraryPath`) but its **hands-on validation is Phase 11**. The build-tagged CGo means the default Windows control-plane build still has no compiler dependency; the `onnx`-tagged build is what Phase 11 validates on Windows.
+Write the adapter and runtime manager cross-platform now; the ORT DLL loading path is coded (with the Windows `onnxruntime.dll` discovery via `SetSharedLibraryPath`) but its **hands-on validation is Phase 12**. The build-tagged CGo means the default Windows control-plane build still has no compiler dependency; the `onnx`-tagged build is what Phase 12 validates on Windows.
 
 ## Work breakdown
 1. **ORT bring-up**: install Go toolchain + ORT 1.26.0 libs in the dev/CI environment; `yalue` binding smoke (load a trivial ONNX, run it) on macOS/Linux; the build-tag split for CGo isolation.
@@ -48,11 +48,11 @@ Write the adapter and runtime manager cross-platform now; the ORT DLL loading pa
 - [ ] The runtime manager lazy-loads on first synth, stays warm during activity, and unloads after the idle TTL (verified by memory drop + `Runtime*` events).
 - [ ] Admin UI shows ORT version/provider/lib path + TTS load state + cold/warm latency.
 - [ ] Default control-plane build is still `CGO_ENABLED=0`; only the `onnx`-tagged build links ORT. CI builds both.
-- [ ] Windows: control-plane builds; `hina doctor` correctly reports local TTS unavailable (gated to Phase 11).
+- [ ] Windows: control-plane builds; `hina doctor` correctly reports local TTS unavailable (gated to Phase 12).
 
 ## Risks & mitigations
 - **`vector_estimator` (257 MB, ~8 steps) latency** → benchmark cold/warm; consider step-count/quality tradeoffs; bounded worker pool.
-- **ORT packaging/cross-compile + DLL shipping** → the real engineering cost (not the text pipeline); pin ORT, app-managed lib dir, doctor visibility; Windows DLL validated in Phase 11.
+- **ORT packaging/cross-compile + DLL shipping** → the real engineering cost (not the text pipeline); pin ORT, app-managed lib dir, doctor visibility; Windows DLL validated in Phase 12.
 - **CGo creeping into the control plane** → strict build-tag isolation + CI building the CGo-free default.
 
 ## References

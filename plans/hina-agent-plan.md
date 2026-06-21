@@ -6,12 +6,12 @@ Updated: 2026-06-19
 > **Companion docs (added 2026-06-18).** This file remains the canonical vision /
 > architecture document. The implementation is now broken into phases — see
 > [`roadmap.md`](roadmap.md) (index + dependency graph) and
-> [`phase-01-foundation.md`](phase-01-foundation.md) … [`phase-11-windows-hardening.md`](phase-11-windows-hardening.md).
+> [`phase-01-foundation.md`](phase-01-foundation.md) … [`phase-12-windows-hardening.md`](phase-12-windows-hardening.md).
 > The open research/spike items and the "clarify before first code" decisions are
 > resolved in [`research-findings.md`](research-findings.md), which is authoritative
 > where it and this document differ (see its Part D for specific corrections).
 > Naming note: "Phase 2" in this title means the **V2 product** (vs. the V1 Python
-> app); it is unrelated to implementation **Phase 1–11** in `roadmap.md`.
+> app); it is unrelated to implementation **Phase 1–12** in `roadmap.md`.
 
 ## Goal
 
@@ -461,7 +461,8 @@ The Windows 11 x64 full-support target includes:
 - text chat and full OpenAI Realtime browser WebRTC mode,
 - local/mixed WebRTC mode once Nemotron and Supertonic pass the Windows ONNX
   spike,
-- managed llama.cpp local LLM with Windows release assets or winget fallback,
+- managed llama.cpp local LLM with Windows release assets or winget fallback
+  (scoped as [`phase-11-managed-local-llm.md`](phase-11-managed-local-llm.md)),
 - Docker `sbx` sandboxes for chat tools and Automations,
 - per-user secret vault and agent-auth state storage,
 - callable-agent Automations through `sbx`.
@@ -538,9 +539,10 @@ Windows-specific sandbox requirements:
   spaces, long paths, Unicode names, and case-insensitive collisions.
 - Test `sbx --clone`, `sbx cp`, generated kits/templates, policy files, and
   secret injection on Windows before marking Automations supported there.
-- Host inference access should use the same `host.docker.internal:<port>` path
-  on Windows, macOS, and Linux where `sbx` supports it. The server-owned gateway
-  still authorizes the specific host service; the hostname alone is not the
+- Host inference access should use the same `host.docker.internal:<proxy-port>`
+  path to the server-owned **/v1 proxy** on Windows, macOS, and Linux where `sbx`
+  supports it. The proxy (not the raw `llama-server` port) authorizes the specific
+  host service and path-filters to the inference API; the hostname alone is not the
   security boundary.
 - Agent browser-auth setup containers must work from a Windows browser even
   though the auth command runs inside `sbx`. Device-code and paste-code flows
@@ -557,11 +559,15 @@ agent calls, and secret-backed CLI invocations. A model response by itself
 should never receive direct host filesystem access, raw host environment
 variables, another user's workspace, or another user's secrets.
 
-Host inference access from sandboxes should be narrow and explicit. Pi and any
-future local-only agent should reach llama.cpp through a server-owned host
-inference gateway or allow-listed `host.docker.internal:<port>` rule, not broad
-host networking. The gateway should expose only the local OpenAI-compatible LLM
-endpoint needed by that run and should not expose arbitrary host services.
+Host inference access from sandboxes must be narrow and explicit. Pi and any
+future local-only agent reach llama.cpp **only** through a server-owned
+host-inference **proxy** that path/method-filters to the local OpenAI-compatible
+`/v1` API — never the raw `llama-server` port, whose admin/control/introspection
+endpoints (`/props`, `/slots`, `/metrics`, model load/unload) must stay
+unreachable from sandboxed agent code. The Phase 7 allow-list is port-level, so it
+may grant a sandbox reachability **to that proxy only**, not to the raw server
+port, and must not expose arbitrary host services. (Scoped in
+[`phase-11-managed-local-llm.md`](phase-11-managed-local-llm.md) scope 7.)
 
 Sandbox storage should be persistent where the user expects durable work, but
 ephemeral for container implementation details:
@@ -908,7 +914,7 @@ Callable agent support:
 - Initial Codex adapter: use `codex exec` with `--json`, `--cd <workspace>`, `--skip-git-repo-check`, and `--output-schema <schema>` when structured output is requested. Do not use deprecated `--full-auto`. For the unrestricted/highest-autonomy profile, use `--dangerously-bypass-approvals-and-sandbox` / `--yolo` only inside the per-run Docker `sbx` sandbox; otherwise prefer `--sandbox workspace-write --ask-for-approval never`.
 - Initial Claude adapter: use `claude -p` with `--output-format stream-json --verbose --include-partial-messages` for streamed progress, `--output-format json --json-schema <schema>` for structured terminal output, `--max-turns` from the Automation budget, and `--permission-mode bypassPermissions` or `--dangerously-skip-permissions` only inside the per-run Docker `sbx` sandbox. For subscription/browser-auth runs, do not use `--bare`; prefer `--safe-mode` if available and tested because it keeps auth working while reducing local customization loading. Use `--allowedTools` / `--disallowedTools` for granular profiles when we want Claude's own policy layer to mirror the sandbox.
 - Initial Cursor adapter: use `agent -p` / `--print`; add `--force` or `--yolo` for write-capable runs; use `--output-format json` for final results or `--output-format stream-json --stream-partial-output` for progress. Provide `CURSOR_API_KEY` through the per-user secret injection path, not global process env.
-- Initial Pi adapter: generate a Pi config for the run with a local provider pointing at `http://host.docker.internal:<llamacpp-port>/v1` or the server-owned inference gateway, `api = "openai-completions"` unless a spike proves `openai-responses` is better for the active llama.cpp build, and a dummy local API key. Prefer `pi --mode rpc` for controlled runs so the adapter can stream events, steer/cancel, and collect state. Use one-shot JSON/print mode only for simple tasks. Disable Pi extensions, skills, prompt templates, and context-file loading by default unless the user/admin explicitly enables them inside the sandbox policy.
+- Initial Pi adapter: generate a Pi config for the run with a local provider pointing at the **server-owned host-inference proxy** (`http://host.docker.internal:<proxy-port>/v1`, path-filtered to the `/v1` API — never the raw `llama-server` port; see [`phase-11-managed-local-llm.md`](phase-11-managed-local-llm.md) scope 7), `api = "openai-completions"` unless a spike proves `openai-responses` is better for the active llama.cpp build, and a dummy local API key. Prefer `pi --mode rpc` for controlled runs so the adapter can stream events, steer/cancel, and collect state. Use one-shot JSON/print mode only for simple tasks. Disable Pi extensions, skills, prompt templates, and context-file loading by default unless the user/admin explicitly enables them inside the sandbox policy.
 - Each adapter should emit a normalized `AgentRunResult` containing status, final text, structured output if present, changed files, tool calls if parseable, token/cost metadata if available, raw stdout/stderr artifact paths, and duration.
 - Callable agents inherit the Automation's sandbox restrictions. If network, host inference, or a CLI is not allow-listed, the spawned agent cannot bypass that.
 - Treat CLI flags, auth requirements, output formats, and autonomy modes as versioned adapter capabilities with health checks because these tools change over time.
@@ -1529,7 +1535,7 @@ Run the benchmark harness against:
 > in [`research-findings.md`](research-findings.md) Part A and built in
 > [`phase-01-foundation.md`](phase-01-foundation.md). The "Research or spike before
 > dependent feature work" items are resolved in `research-findings.md` Part B, except
-> the hardware-gated ones (Part C, mostly Phase 11). Kept here for context;
+> the hardware-gated ones (Part C, mostly Phase 12). Kept here for context;
 > `research-findings.md` is authoritative.
 
 The plan is ready to start a narrow bootstrap only after the first-code
@@ -1711,7 +1717,7 @@ Research or spike before dependent feature work:
 > [`research-findings.md`](research-findings.md) Part B with chosen libraries and
 > versions. The remaining open spikes are code/hardware tasks owned by their phase in
 > [`roadmap.md`](roadmap.md) — the native-Windows spikes are gathered into
-> [`phase-11-windows-hardening.md`](phase-11-windows-hardening.md). See
+> [`phase-12-windows-hardening.md`](phase-12-windows-hardening.md). See
 > `research-findings.md` Part D for corrections that supersede earlier statements in
 > this document (e.g. `CODEX_API_KEY` removed, `--full-auto` deprecated, local Opus
 > encoding avoided via PCM-over-datachannel, OpenAI Realtime `call_id` from the

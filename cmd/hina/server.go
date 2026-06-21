@@ -184,7 +184,7 @@ func buildTTS(a *app, sink tts.EventSink) tts.Engine {
 		return nil
 	}
 	if assets.WindowsLocalVoiceGated && runtime.GOOS == "windows" {
-		a.log.Warn("tts: local voice is gated to Phase 11 on Windows; leaving it disabled")
+		a.log.Warn("tts: local voice is gated to Phase 12 on Windows; leaving it disabled")
 		return nil
 	}
 	root := assetsRoot(a.cfg, a.paths)
@@ -252,7 +252,7 @@ func buildASR(a *app, sink asr.EventSink) asr.Engine {
 		return nil
 	}
 	if assets.WindowsLocalVoiceGated && runtime.GOOS == "windows" {
-		a.log.Warn("asr: local voice is gated to Phase 11 on Windows; leaving it disabled")
+		a.log.Warn("asr: local voice is gated to Phase 12 on Windows; leaving it disabled")
 		return nil
 	}
 	root := assetsRoot(a.cfg, a.paths)
@@ -309,7 +309,7 @@ func buildVAD(a *app, sink vad.EventSink) *vad.Engine {
 		return nil
 	}
 	if assets.WindowsLocalVoiceGated && runtime.GOOS == "windows" {
-		a.log.Warn("voice: local voice is gated to Phase 11 on Windows; leaving the live loop disabled")
+		a.log.Warn("voice: local voice is gated to Phase 12 on Windows; leaving the live loop disabled")
 		return nil
 	}
 	root := assetsRoot(a.cfg, a.paths)

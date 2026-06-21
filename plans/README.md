@@ -20,4 +20,5 @@ Each is a separately testable chunk (details in its file; overview in [`roadmap.
 4. [Local TTS + ORT runtime](phase-04-local-tts.md) · 5. [Local streaming ASR](phase-05-local-asr.md) · 6. [Live voice pipeline](phase-06-live-voice.md)
 7. [Sandbox + secrets](phase-07-sandbox-secrets.md) · 8. [Agent auth + callable agents](phase-08-agent-auth-callable.md) · 9. [Automations](phase-09-automations.md)
 10. [Full OpenAI Realtime mode](phase-10-openai-realtime.md)
-11. [Windows validation & hardening](phase-11-windows-hardening.md)
+11. [Managed local llama.cpp LLM](phase-11-managed-local-llm.md) — install/spawn/supervise/idle-unload a local `llama-server`; account-free local text + voice
+12. [Windows validation & hardening](phase-12-windows-hardening.md)

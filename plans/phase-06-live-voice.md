@@ -3,7 +3,7 @@
 Status: **implemented**. The live conversation loop (continuous VAD → ASR → agent → TTS with
 speak-to-interrupt barge-in) runs on Linux/macOS behind the `onnx` build tag; the turn-detection
 logic, the agent loop, and the benchmark harness are CGo-free and tested in the default build.
-Windows local voice stays gated to Phase 11.
+Windows local voice stays gated to Phase 12.
 Depends on: Phase 3 (transport + playback cursor), Phase 4 (TTS), Phase 5 (ASR), Phase 2 (context builder).
 Unblocks: Phase 10 (shares the session/event model and barge-in logic).
 
@@ -59,10 +59,10 @@ Make it feel like talking to a person, locally. Tie STT → LLM → TTS into a l
 - Full OpenAI Realtime mode (Phase 10).
 - `nlpodyssey/openai-agents-go` adoption — **evaluate it here** (after the event/session model is stable, per [`research-findings.md` B9](research-findings.md#b9-go-agent-sdk--cloud-sdks--llama-server--green-sdk-yellow)); adopt only if it cleanly supports streaming/cancellation/tool-approvals/MCP/local backends without fighting the event model, and pin a commit SHA if adopted.
 - Sortformer diarization / Parakeet EOU — optional later experiments, not required for barge-in.
-- **Windows local voice** — still gated to Phase 11; this phase's live loop runs on Linux/macOS. Cloud STT/LLM/TTS variants of the loop can run on Windows.
+- **Windows local voice** — still gated to Phase 12; this phase's live loop runs on Linux/macOS. Cloud STT/LLM/TTS variants of the loop can run on Windows.
 
 ## Windows posture
-The pipeline logic is cross-platform; it depends on the Phase 4/5 `onnx` runtimes which are Windows-validated only in Phase 11. The benchmark harness is non-interactive and runs on the Windows CI runner (against no-model/loopback + cloud fixtures) from this phase. Local-voice fixtures on native Windows run in Phase 11.
+The pipeline logic is cross-platform; it depends on the Phase 4/5 `onnx` runtimes which are Windows-validated only in Phase 12. The benchmark harness is non-interactive and runs on the Windows CI runner (against no-model/loopback + cloud fixtures) from this phase. Local-voice fixtures on native Windows run in Phase 12.
 
 ## Work breakdown
 1. **Agent loop** generalizing Phase 2's text turn (cancellation, event emission, tool hook).

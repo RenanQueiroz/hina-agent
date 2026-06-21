@@ -32,10 +32,10 @@ All model/graph/decode facts are pinned in [`research-findings.md` B3](research-
 ### Explicitly out (deferred)
 - VAD-driven turn boundaries, semantic VAD, interruption (Phase 6) — this phase emits partials/finals given a speech segment; Phase 6 decides *when* a turn starts/ends.
 - The full live loop (Phase 6).
-- **Windows local ASR stays disabled** until the Phase 11 ORT-DLL gate; Windows reports local voice unavailable.
+- **Windows local ASR stays disabled** until the Phase 12 ORT-DLL gate; Windows reports local voice unavailable.
 
 ## Windows posture
-Adapter written cross-platform over the `onnx`-tagged ORT build from Phase 4. Hands-on Windows ASR (DLL load + streaming cache + latency) is the centerpiece of the Phase 11 ORT spike. Until then, Windows = text + cloud + OpenAI Realtime only.
+Adapter written cross-platform over the `onnx`-tagged ORT build from Phase 4. Hands-on Windows ASR (DLL load + streaming cache + latency) is the centerpiece of the Phase 12 ORT spike. Until then, Windows = text + cloud + OpenAI Realtime only.
 
 ## Work breakdown
 1. **Front-end** + a feature-parity fixture test vs a reference dump (gate before trusting WER).
@@ -52,7 +52,7 @@ Adapter written cross-platform over the `onnx`-tagged ORT build from Phase 4. Ha
 - [x] Biasing mechanism implemented + unit-tested (a confusable word-initial token flips to the biased one). The real "Hina" vs "Nina"/"Tina" substitution-rate drop is a Phase 6 fixture measurement.
 - [x] Wake-token detect-and-strip removes a leading address before the body; a mis-transcription degrades only wake detection, not the request body (unit-tested).
 - [x] Runtime manager lazy-loads/idle-unloads ASR like TTS (shared `onnx.Lifecycle`; idle-unload test).
-- [x] Windows: control-plane builds; `hina doctor` reports local ASR unavailable (gated to Phase 11).
+- [x] Windows: control-plane builds; `hina doctor` reports local ASR unavailable (gated to Phase 12).
 
 ## Risks & mitigations
 - **Front-end numeric fidelity** (#1 risk) → fixture-compare to NeMo/`parakeet-rs` before tuning anything else.

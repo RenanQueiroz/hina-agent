@@ -28,7 +28,7 @@ The decided architecture is fixed in [`research-findings.md` B5](research-findin
 - The full OpenAI Realtime cloud mode (Phase 10) — but keep the client's session adapter abstract so it can later switch base targets (local vs OpenAI) per the main plan.
 
 ## Windows posture
-Pion v4 is pure Go / no CGo, so this **builds and cross-compiles for Windows now** with no native toolchain — a deliberate reason it's early. The browser owns capture/playback, so there is no Go desktop audio device path to port. Hands-on Windows WebRTC loopback (browser capture/playback + Pion on localhost) is part of Phase 11's benchmark matrix, but the code is Windows-ready from this phase.
+Pion v4 is pure Go / no CGo, so this **builds and cross-compiles for Windows now** with no native toolchain — a deliberate reason it's early. The browser owns capture/playback, so there is no Go desktop audio device path to port. Hands-on Windows WebRTC loopback (browser capture/playback + Pion on localhost) is part of Phase 12's benchmark matrix, but the code is Windows-ready from this phase.
 
 ## Work breakdown
 1. **Signaling endpoint** mirroring OpenAI's `/realtime/calls` `application/sdp` shape; per-user single active session; tie the peer's lifetime to a conversation id so live mode attaches to a session.
@@ -47,7 +47,7 @@ Pion v4 is pure Go / no CGo, so this **builds and cross-compiles for Windows now
 - [ ] Control events flow both directions over the datachannel using the Phase 1 envelope; a manual "interrupt" button stops outbound audio within the target budget and the cursor reflects the truncation point.
 - [ ] Pion RTCP/loss stats are visible in the admin UI; inducing packet loss (throttle) degrades gracefully.
 - [ ] Mic works over HTTPS on a second LAN device with a user-provided cert (documented), and over plain localhost.
-- [ ] Builds + smoke-passes on the Windows CI runner (hands-on browser loopback on Windows deferred to Phase 11).
+- [ ] Builds + smoke-passes on the Windows CI runner (hands-on browser loopback on Windows deferred to Phase 12).
 
 ## Risks & mitigations
 - **No pure-Go Opus encoder** → avoided entirely by PCM-over-datachannel (B5). Keep `jj11hh/opus` (WASM, CGo-free) noted as the fallback only if a true Opus return track is ever needed.

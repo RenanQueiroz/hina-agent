@@ -120,17 +120,17 @@ var ortAssets = map[string]Asset{
 	},
 }
 
-// WindowsLocalVoiceGated keeps Windows local voice behind the Phase 11 ORT-DLL
-// validation gate (phase-04-local-tts.md "Explicitly out", phase-11; research-
+// WindowsLocalVoiceGated keeps Windows local voice behind the Phase 12 ORT-DLL
+// validation gate (phase-04-local-tts.md "Explicitly out", phase-12; research-
 // findings C1). While true, Windows is treated as having no ORT build, so
 // `hina assets pull` refuses and `hina doctor` reports local TTS unavailable
 // there — even though the Windows ORT asset is pinned and ready. Flip to false
-// once Phase 11 validates the DLL-load path on a real Windows host.
+// once Phase 12 validates the DLL-load path on a real Windows host.
 const WindowsLocalVoiceGated = true
 
 // ORTAsset returns the pinned ORT library for a GOOS/GOARCH, ok=false if Microsoft
 // ships no CPU build for that platform at this version, or (for Windows) while it
-// remains behind the Phase 11 validation gate.
+// remains behind the Phase 12 validation gate.
 func ORTAsset(goos, goarch string) (Asset, bool) {
 	if WindowsLocalVoiceGated && goos == "windows" {
 		return Asset{}, false

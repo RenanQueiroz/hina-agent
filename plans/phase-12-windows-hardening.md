@@ -1,7 +1,7 @@
-# Phase 11 — Windows native validation & hardening
+# Phase 12 — Windows native validation & hardening
 
-Status: runs as the gating pass once the features it covers exist (after Phases 4, 5, 7; ideally before each track's GA).
-Depends on: Phase 4 (TTS/ORT), Phase 5 (ASR), Phase 7 (sandbox/vault), and the OS primitives written across all phases.
+Status: runs as the gating pass once the features it covers exist (after Phases 4, 5, 7, 11; ideally before each track's GA).
+Depends on: Phase 4 (TTS/ORT), Phase 5 (ASR), Phase 7 (sandbox/vault), Phase 11 (managed llama.cpp backend), and the OS primitives written across all phases.
 Unblocks: native Windows GA; local ONNX voice on Windows; macOS validation if it was deferred.
 
 ## Goal
@@ -15,7 +15,7 @@ This phase executes the **DEFERRED** items in [`research-findings.md` Part C / C
 ### In — the Windows spike matrix
 1. **Platform spike**: install/run `hina server` from PowerShell; create app state/cache/data dirs with correct ACLs; run SQLite migrations (CGo-free `modernc.org/sqlite`); start and **cancel child processes with Job-Object process-tree cleanup** (no orphaned `llama-server.exe`/`sbx.exe`/agent processes); verify logs (CRLF normalization, path/secret redaction); `hina doctor` without WSL.
 2. **`sbx` on Windows**: `winget install -h Docker.sbx`; Docker login; Hypervisor Platform detection; `sbx run shell`; generated kit; workspace mount with **spaces / Unicode / long paths / drive letters / case-insensitive collisions**; `sbx cp`; network policy + `host.docker.internal` host-service access via allow-list; secret injection; failure reporting. Validate `sbx run --name` re-attach (the v0.33.0 change) and the pinned version's exact command lines.
-3. **llama.cpp on Windows**: install via upstream release zip or `winget install ggml.llamacpp`; launch `llama-server.exe` with `--models-preset … --models-max 1 --sleep-idle-seconds …`; health, idle unload, restart, log streaming, cancellation; CUDA (separate `win-cuda-*` zip + `cudart-*` DLLs) vs Vulkan (winget default) capability detection; Pi access through the host-inference gateway.
+3. **llama.cpp on Windows** — the hands-on Windows validation of the **Phase 11 managed llama.cpp backend**: install via upstream release zip or `winget install ggml.llamacpp`; launch `llama-server.exe` with `--models-preset … --models-max 1 --sleep-idle-seconds …`; health, idle unload, restart, log streaming, cancellation; CUDA (separate `win-cuda-*` zip + `cudart-*` DLLs) vs Vulkan (winget default) capability detection; Pi access through the host-inference gateway.
 4. **ONNX Runtime Go spike (the local-voice gate)**: download/pin ORT CPU DLLs into the app runtime dir; load via `yalue` `SetSharedLibraryPath` (not system path); run a tiny ONNX fixture; then **minimal Supertonic and Nemotron fixture passes** with streaming-cache reset across turns and stable latency. Record whether CGo is build-time only or leaks into end-user setup; document WinML/DirectML/CPU EP choice. **Passing this flips local TTS (Phase 4) and local ASR (Phase 5) from "unavailable" to enabled on Windows.**
 5. **Secret-vault spike**: DPAPI / Credential Manager vs ACL-guarded key file for **desktop and service-account** deployments; backup/restore behavior; redaction in logs/artifacts. Flip the `internal/platform` Windows master-key impl from stub to validated.
 6. **Path/permission fixtures**: workspace roots, long paths, drive letters, case collisions, symlinks/reparse-point privileges, ACL failures, CRLF logs, sandbox mount translation.

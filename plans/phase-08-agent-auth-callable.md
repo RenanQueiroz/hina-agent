@@ -1,7 +1,7 @@
 # Phase 8 — Agent auth broker + callable agent adapters (Codex / Claude / Cursor / Pi)
 
-Status: ready after Phase 7.
-Depends on: Phase 7 (sandboxes + secret/agent-state storage).
+Status: ready after Phase 7 (Pi also needs Phase 11).
+Depends on: Phase 7 (sandboxes + secret/agent-state storage); Phase 11 for the Pi adapter (the managed host llama.cpp endpoint it targets).
 Unblocks: Phase 9 (Automations spawn callable agents).
 
 ## Goal
@@ -21,16 +21,16 @@ Verified CLI flags + the **5 corrections** are in [`research-findings.md` B7](re
    - Codex: `codex exec --json [--output-schema] --cd <ws> --skip-git-repo-check`; autonomy `--sandbox workspace-write --ask-for-approval never` or `--yolo` inside `sbx`. **Not `--full-auto`** (deprecated).
    - Claude: `claude -p --output-format stream-json --verbose --include-partial-messages` (progress) or `--output-format json --json-schema <s>` (structured); `--max-turns` from budget; `--dangerously-skip-permissions` only inside `sbx`; `--safe-mode` for subscription runs; **never `--bare` for subscription** (it ignores OAuth).
    - Cursor: `agent -p --output-format json|stream-json [--stream-partial-output]`, `--force`/`--yolo`; `CURSOR_API_KEY` via per-user injection. Verify headless cancellation empirically.
-   - **Pi (local-only)**: generate per-run `models.json` pointing at `http://host.docker.internal:<llamacpp-port>/v1`, `api="openai-completions"`, dummy key; prefer `pi --mode rpc` (stream/steer/abort); disable extensions/skills/context (`--no-extensions/--no-skills/--no-context-files`); `PI_OFFLINE=1`; **never a cloud provider**; reach llama.cpp only through the Phase 7 host-inference gateway/allow-list.
+   - **Pi (local-only)**: generate per-run `models.json` pointing at the **Phase 11 managed backend through the Hina-owned host-inference proxy** (`http://host.docker.internal:<proxy-port>/v1`, the path-filtered `/v1` gateway — never the raw `llama-server` port), `api="openai-completions"`, dummy key; prefer `pi --mode rpc` (stream/steer/abort); disable extensions/skills/context (`--no-extensions/--no-skills/--no-context-files`); `PI_OFFLINE=1`; **never a cloud provider**; reach llama.cpp only through that Phase 7 host-inference proxy/allow-list.
 4. **Eligibility validation**: chat/Automation UIs offer Codex/Claude/Cursor only with a valid configured profile; offer Pi only when admin policy allows `agent.pi.run`, the local LLM exposes a llama.cpp endpoint, and sandbox policy allows host inference. Runs record the auth-profile *type* (`browser_state`/`api_key`/`oauth_token`/`local_llamacpp`) without storing credential values.
 5. **Optional MCP facade**: expose the adapters as MCP tools so MCP-capable LLMs can call them while Go still owns invocation. (Codex itself can also run as `codex mcp-server`; keep the direct `codex exec` adapter primary — easier to budget/stream/cancel.)
 
 ### Explicitly out (deferred)
 - Automation scheduler/steps that *orchestrate* these agents (Phase 9) — Phase 8 makes one agent callable as a tool; Phase 9 wires them into workflows.
-- Windows browser-auth-from-sandbox validation (device/paste-code from a Windows browser) → Phase 11.
+- Windows browser-auth-from-sandbox validation (device/paste-code from a Windows browser) → Phase 12.
 
 ## Windows posture
-Adapters are cross-platform process invocations inside `sbx`. The Windows-specific concern — browser/device/paste-code auth working from a Windows browser while the CLI runs inside `sbx` — is validated in Phase 11.
+Adapters are cross-platform process invocations inside `sbx`. The Windows-specific concern — browser/device/paste-code auth working from a Windows browser while the CLI runs inside `sbx` — is validated in Phase 12.
 
 ## Testable exit criteria (Linux/macOS this phase)
 - [ ] A user browser-authenticates Codex (or Claude/Cursor) through the web UI via PTY streaming with URL/code capture; status check confirms; logout deletes stored state.

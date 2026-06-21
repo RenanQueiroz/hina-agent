@@ -60,10 +60,10 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 	// External runtimes (present-or-not; deeper validation in their phases).
 	r.addTool(ctx, "docker", "Phase 7 sandbox prerequisite", "docker", "--version")
 	r.addTool(ctx, "sbx", "Phase 7 sandbox runtime", "sbx", "--version")
-	r.addTool(ctx, "llama.cpp (llama-server)", "Phase 4 local LLM", "llama-server", "--version")
+	r.addTool(ctx, "llama.cpp (llama-server)", "Phase 11 managed local LLM", "llama-server", "--version")
 
 	// WebRTC voice bridge — pure Go (Pion), so always available with no native
-	// toolchain. Hands-on browser loopback is validated in Phase 11.
+	// toolchain. Hands-on browser loopback is validated in Phase 12.
 	r.add("webrtc voice bridge (pion)", "ok", "pure-Go media bridge; no native toolchain")
 
 	// HTTPS / LAN. Browser mic capture (getUserMedia) requires a secure context:
@@ -112,7 +112,7 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 	ttsOK, ttsReason := assets.SupertonicVerified(root)
 	switch {
 	case ortUnsupported:
-		r.add("local tts (supertonic)", "unavailable", "no ONNX Runtime build for this platform (Windows local voice gated to Phase 11)")
+		r.add("local tts (supertonic)", "unavailable", "no ONNX Runtime build for this platform (Windows local voice gated to Phase 12)")
 	case !cfg.TTS.Enabled:
 		r.add("local tts (supertonic)", "unavailable", "disabled: set [tts] enabled=true, build with -tags onnx, and run 'hina assets pull'")
 	case !info.Available:
@@ -124,11 +124,11 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 	}
 
 	// Local streaming ASR (Phase 5, Nemotron). Same shared ONNX runtime; gated on
-	// the ORT runtime + the Nemotron assets ONLY. Windows stays gated to Phase 11.
+	// the ORT runtime + the Nemotron assets ONLY. Windows stays gated to Phase 12.
 	asrOK, asrReason := assets.ASRVerified(root)
 	switch {
 	case ortUnsupported:
-		r.add("local asr (nemotron)", "unavailable", "no ONNX Runtime build for this platform (Windows local voice gated to Phase 11)")
+		r.add("local asr (nemotron)", "unavailable", "no ONNX Runtime build for this platform (Windows local voice gated to Phase 12)")
 	case !cfg.ASR.Enabled:
 		r.add("local asr (nemotron)", "unavailable", "disabled: set [asr] enabled=true, build with -tags onnx, and run 'hina assets pull'")
 	case !info.Available:
@@ -141,11 +141,11 @@ func Run(ctx context.Context, cfg config.Config, paths platform.Paths) Report {
 
 	// Live voice (Phase 6) — the continuous VAD->ASR->agent->TTS loop. Gated on the
 	// Silero VAD model AND that local ASR + TTS can run (it needs all three). Windows
-	// stays gated to Phase 11.
+	// stays gated to Phase 12.
 	vadOK, vadReason := assets.VADVerified(root)
 	switch {
 	case ortUnsupported:
-		r.add("live voice (vad)", "unavailable", "no ONNX Runtime build for this platform (Windows local voice gated to Phase 11)")
+		r.add("live voice (vad)", "unavailable", "no ONNX Runtime build for this platform (Windows local voice gated to Phase 12)")
 	case !cfg.Voice.Enabled:
 		r.add("live voice (vad)", "unavailable", "disabled: set [voice] enabled=true (also needs [tts]+[asr]), build with -tags onnx, and run 'hina assets pull'")
 	case !info.Available:
@@ -188,7 +188,7 @@ func tier() string {
 	case "linux/amd64", "darwin/arm64":
 		return "Tier 1"
 	case "windows/amd64":
-		return "Tier 1 (built; hands-on validation pending — Phase 11)"
+		return "Tier 1 (built; hands-on validation pending — Phase 12)"
 	default:
 		return "Tier 2 / unvalidated"
 	}

@@ -22,12 +22,12 @@ Establish the **per-user security boundary** that every user-scoped side effect 
 ### Explicitly out (deferred)
 - Agent auth broker + Codex/Claude/Cursor/Pi adapters (Phase 8).
 - Automations (Phase 9).
-- **`sbx`-on-Windows hands-on validation** (install, Hypervisor Platform, mounts with spaces/Unicode, `sbx cp`, policy, secret injection, `host.docker.internal`) → Phase 11. Build the runner cross-platform now; on Windows `hina doctor` reports `sbx` status and marks sandbox-dependent features per its availability.
+- **`sbx`-on-Windows hands-on validation** (install, Hypervisor Platform, mounts with spaces/Unicode, `sbx cp`, policy, secret injection, `host.docker.internal`) → Phase 12. Build the runner cross-platform now; on Windows `hina doctor` reports `sbx` status and marks sandbox-dependent features per its availability.
 
 ## Windows posture
-The runner is written against the same `host.docker.internal` + policy semantics on all OSes. Windows `sbx` needs Win11 x64 + Hypervisor Platform + `winget install Docker.sbx`; that whole path is validated in Phase 11. Master-key DPAPI vs ACL-file storage is coded now (Phase 1 `internal/platform` hook) and validated in Phase 11.
+The runner is written against the same `host.docker.internal` + policy semantics on all OSes. Windows `sbx` needs Win11 x64 + Hypervisor Platform + `winget install Docker.sbx`; that whole path is validated in Phase 12. Master-key DPAPI vs ACL-file storage is coded now (Phase 1 `internal/platform` hook) and validated in Phase 12.
 
-## Testable exit criteria (Linux/macOS this phase; Windows in Phase 11)
+## Testable exit criteria (Linux/macOS this phase; Windows in Phase 12)
 - [ ] A model-requested shell tool in a chat runs inside the user's `sbx` sandbox, returns output, and is audit-logged; it cannot read host files, host env, or another user's workspace.
 - [ ] Network is default-deny for shell/code tools; a host service (e.g. a local port) is reachable only after an explicit allow-list entry; other host services remain unreachable.
 - [ ] A secret stored in the vault is injectable into one run as an env var/file, absent afterward, and never appears in admin UI/logs; DB-only inspection shows no plaintext.
@@ -38,7 +38,7 @@ The runner is written against the same `host.docker.internal` + policy semantics
 ## Risks & mitigations
 - **`sbx` velocity/breaking changes** → pin + command-line smoke test in `hina doctor`/CI; treat `sbx kit` (Early Access) as least stable.
 - **Operational complexity** (stale sandboxes, storage growth, policy) → janitor + quotas + admin visibility from the start.
-- **Host-inference bridge becoming broad host access** → llama.cpp reachable only via the explicit gateway/allow-list; test other host services are unreachable.
+- **Host-inference bridge becoming broad host access** → the managed llama.cpp endpoint (Phase 11) reachable only via a path-filtered host-inference proxy (the `/v1` API, not the raw `llama-server` port) behind the explicit allow-list; test other host services — and llama-server's own control endpoints — are unreachable.
 - **Vault not protecting against malicious host/root** → documented boundary (C5); envelope encryption protects DB-compromise + normal admin UI, not a modified server binary.
 
 ## References

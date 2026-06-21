@@ -18,7 +18,7 @@ Automation semantics still to nail down before promising portable imports are in
 3. **Durable scheduler**: persists definitions (`automations`); on restart resumes enabled Automations and computes next run; missed runs while down default to `skip`. Concurrency policies (skip-if-running / queue-one / parallel-N / cancel-previous). Budgets (wall time, model calls, agent runs, artifact/log bytes). Stops cleanly on server shutdown (schedules, runs, sandboxes, agents, workers — nothing lingers).
 4. **Run records** (`automation_runs`, `automation_artifacts`): immutable per run — input snapshot, step logs, model calls, tool calls, spawned agent runs, artifacts, final output, timings, status, errors. Run inside per-user/per-automation `sbx` sandboxes (Phase 7) inheriting the Automation's permission profile.
 5. **Deterministic tools** (run before waking LLMs): `github.notifications`, `github.pr_checkout`, `github.pr_comment`, `http.request` (bounded), `shell.exec` (argv-first; shell-string gated by policy), `mcp.call`. Argv-style over shell strings for safe validation.
-6. **Agent steps**: `agent.codex.exec` / `agent.claude.run` / `agent.cursor.run` / `agent.pi.run` via the Phase 8 adapters; `parallel` agent groups; aggregation/verification `llm` step. Host services allow-list (initially only `llamacpp` for Pi).
+6. **Agent steps**: `agent.codex.exec` / `agent.claude.run` / `agent.cursor.run` / `agent.pi.run` via the Phase 8 adapters; `parallel` agent groups; aggregation/verification `llm` step. Host services allow-list (initially only `llamacpp` — the Phase 11 managed backend — for Pi).
 7. **Builder UI** (React Hook Form + Zod + Ajv; CodeMirror only for generated-JSON preview / import repair / advanced): structured forms for trigger, schedule, permission profile, secrets, tools, workflow steps, agent steps, aggregation, outputs → emits `automation.v1`. Import/export with repairable validation errors. Run history with logs/artifacts/agent reports/final output.
 8. **LLM-assisted creation**: explain the schema to the active server LLM → ask for JSON only → validate → feed errors back and retry to a limit → show the validated Automation for review before enabling. Always require human review before enable (schema-valid ≠ safe).
 9. **Eligibility/visibility**: surface sandbox permissions, granted secrets, network access, enabled outputs before a user enables an Automation; validation fails on unavailable agent auth profiles, missing secret refs, or disallowed agents.
@@ -27,10 +27,10 @@ Automation semantics still to nail down before promising portable imports are in
 - Webhook/event triggers (later) — start with interval/cron/manual.
 - Catch-up/backfill of missed runs (deferred until a real workflow needs it — surprising side effects).
 - Visual DAG canvas (React Flow) — start with structured forms.
-- Windows Automation validation (`sbx`-on-Windows, agent auth from Windows browser) → Phase 11.
+- Windows Automation validation (`sbx`-on-Windows, agent auth from Windows browser) → Phase 12.
 
 ## Windows posture
-Scheduler + schema + runner are cross-platform; the sandbox/agent execution underneath is Windows-validated in Phase 11. Automations marked supported on Windows only after that.
+Scheduler + schema + runner are cross-platform; the sandbox/agent execution underneath is Windows-validated in Phase 12. Automations marked supported on Windows only after that.
 
 ## Testable exit criteria (Linux/macOS this phase)
 - [ ] Create the GitHub PR-review Automation in the builder; it emits valid `automation.v1`; export/import round-trips with redacted secrets (only `secret_refs`).
