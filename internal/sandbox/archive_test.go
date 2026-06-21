@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -30,10 +31,12 @@ func TestTarDirRoundTrip(t *testing.T) {
 	if got := readFile(t, filepath.Join(dst, "sub", "deep", "config")); got != "x=1" {
 		t.Errorf("config = %q", got)
 	}
-	// Extracted files must be owner-only.
-	info, _ := os.Stat(filepath.Join(dst, "auth.json"))
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("extracted file mode = %v, want 0600", info.Mode().Perm())
+	// Extracted files must be owner-only (Unix perm bits don't apply on Windows).
+	if runtime.GOOS != "windows" {
+		info, _ := os.Stat(filepath.Join(dst, "auth.json"))
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("extracted file mode = %v, want 0600", info.Mode().Perm())
+		}
 	}
 }
 
