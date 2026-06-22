@@ -394,6 +394,165 @@ export interface AdminAgents {
   profiles: AdminAgentProfile[];
 }
 /**
+ * AutomationSummary is a list-row projection of an automation (no full definition).
+ */
+export interface AutomationSummary {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger: string; // interval | cron | manual
+  next_run?: string;
+  last_run?: string;
+  last_status?: string;
+  created_at: string;
+  updated_at: string;
+}
+/**
+ * AutomationList is the GET /automations response.
+ */
+export interface AutomationList {
+  automations: AutomationSummary[];
+}
+/**
+ * AutomationDetail is one automation with its full automation.v1 document.
+ */
+export interface AutomationDetail {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger: string;
+  next_run?: string;
+  last_run?: string;
+  last_status?: string;
+  created_at: string;
+  updated_at: string;
+  definition: unknown;
+}
+/**
+ * AutomationInput is the create/update/import body: the automation.v1 document.
+ */
+export interface AutomationInput {
+  definition: unknown;
+}
+/**
+ * AutomationIssue is one structural or eligibility problem (path-tagged for repair).
+ */
+export interface AutomationIssue {
+  path: string;
+  message: string;
+}
+/**
+ * AutomationValidation reports structural validity AND enable-eligibility separately,
+ * so the builder can show "valid but not yet runnable" (missing secret/agent) clearly.
+ */
+export interface AutomationValidation {
+  valid: boolean;
+  issues?: AutomationIssue[];
+  eligible: boolean;
+  eligibility_issues?: AutomationIssue[];
+}
+/**
+ * SetAutomationEnabled is the POST /automations/{id}/enabled body.
+ */
+export interface SetAutomationEnabled {
+  enabled: boolean;
+}
+/**
+ * TriggerAutomationResponse is the POST /automations/{id}/run response.
+ */
+export interface TriggerAutomationResponse {
+  run_id: string;
+}
+/**
+ * AutomationRunSummary is a run-history row (no full record).
+ */
+export interface AutomationRunSummary {
+  id: string;
+  automation_id: string;
+  status: string;
+  trigger: string;
+  error?: string;
+  started_at?: string;
+  finished_at?: string;
+  duration_ms: number /* int64 */;
+}
+/**
+ * AutomationRunList is the GET /automations/{id}/runs response.
+ */
+export interface AutomationRunList {
+  runs: AutomationRunSummary[];
+}
+/**
+ * AutomationRunDetail is one run with its full immutable record + artifact metadata.
+ */
+export interface AutomationRunDetail {
+  id: string;
+  automation_id: string;
+  status: string;
+  trigger: string;
+  error?: string;
+  started_at?: string;
+  finished_at?: string;
+  duration_ms: number /* int64 */;
+  record: unknown;
+  artifacts: AutomationArtifactInfo[];
+}
+/**
+ * AutomationArtifactInfo is one promoted artifact's metadata (content via download).
+ */
+export interface AutomationArtifactInfo {
+  id: string;
+  name: string;
+  step_id: string;
+  size: number /* int64 */;
+  created_at: string;
+}
+/**
+ * AutomationAgentOption is one callable agent's availability for the builder.
+ */
+export interface AutomationAgentOption {
+  provider: string;
+  configured: boolean;
+  runnable: boolean;
+}
+/**
+ * AutomationMeta is the GET /automations/meta catalog the builder UI renders against:
+ * the closed tool/adapter/host-service sets plus this owner's secrets + agent
+ * availability and the server gates that decide eligibility.
+ */
+export interface AutomationMeta {
+  enabled: boolean; // [automations] on
+  available: boolean; // scheduler + sandbox usable
+  reason?: string; // why unavailable
+  schema_version: string;
+  tools: string[];
+  adapters: string[];
+  host_services: string[];
+  secrets: string[];
+  agents: AutomationAgentOption[];
+  network_isolated: boolean;
+  agents_enabled: boolean;
+}
+/**
+ * AssistAutomationRequest asks the active LLM to draft an automation.v1 document from
+ * a natural-language description.
+ */
+export interface AssistAutomationRequest {
+  prompt: string;
+}
+/**
+ * AssistAutomationResponse returns the LLM-drafted, schema-validated definition (for
+ * human review before enabling), the validation outcome, and how many attempts the
+ * retry loop took.
+ */
+export interface AssistAutomationResponse {
+  definition: unknown; // always valid JSON ("null" if unparseable)
+  raw_text?: string;
+  valid: boolean;
+  issues?: AutomationIssue[];
+  attempts: number /* int */;
+}
+/**
  * ErrorResponse is the shape of all error bodies.
  */
 export interface ErrorResponse {

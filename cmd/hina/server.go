@@ -14,6 +14,8 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/asr"
 	"github.com/RenanQueiroz/hina-agent/internal/assets"
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
+	"github.com/RenanQueiroz/hina-agent/internal/automation"
+	"github.com/RenanQueiroz/hina-agent/internal/autorun"
 	"github.com/RenanQueiroz/hina-agent/internal/config"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/httpapi"
@@ -146,7 +148,8 @@ func cmdServer(args []string) error {
 	// execution is off); the sbx runner reports itself unavailable when sbx isn't
 	// installed. SetSandbox builds the tool Router only when [sandbox] is enabled.
 	sandboxRunner, workspaces := buildSandbox(a)
-	srv.SetSandbox(buildVault(a), workspaces, sandboxRunner)
+	vaultV := buildVault(a)
+	srv.SetSandbox(vaultV, workspaces, sandboxRunner)
 	// Phase 8 callable agents (Codex/Claude/Cursor/Pi) are built inside SetSandbox
 	// (they reuse the sandbox Router + vault), gated on [agents].enabled + the sandbox
 	// stack being present. Pi additionally needs the Phase 11 local endpoint.
@@ -155,6 +158,14 @@ func cmdServer(args []string) error {
 			"sandbox_enabled", a.cfg.Sandbox.Enabled,
 			"network_isolated", a.cfg.Sandbox.NetworkIsolated,
 			"pi_endpoint", a.cfg.Agents.LocalEndpoint != "")
+	}
+
+	// Phase 9 automations: the durable scheduler that runs user-owned workflows inside
+	// sbx. Built only when [automations] is enabled AND the sandbox stack + vault are
+	// present (runs execute in sbx and resolve granted secrets).
+	autoSvc := buildAutomations(a, srv, sandboxRunner, workspaces, vaultV, provider)
+	if autoSvc != nil {
+		srv.SetAutomations(autoSvc)
 	}
 
 	srv.SetReady(true)
@@ -181,6 +192,15 @@ func cmdServer(args []string) error {
 		go workspaces.Janitor(sigCtx, 10*time.Minute, a.cfg.Sandbox.ScratchTTLOr(time.Hour))
 	}
 
+	// Start the automation scheduler (resumes enabled automations, recomputes next
+	// runs). Stop it on shutdown so in-flight runs are cancelled + finalized cleanly —
+	// nothing lingers. Stop BEFORE the HTTP server fully exits so run records persist.
+	if autoSvc != nil {
+		autoSvc.Start(sigCtx)
+		defer autoSvc.Stop()
+		a.log.Info("automations", "enabled", true, "tick", a.cfg.Automations.TickOr(5*time.Second).String())
+	}
+
 	scheme := "http"
 	if a.cfg.Server.TLSEnabled() {
 		scheme = "https"
@@ -196,6 +216,108 @@ func cmdServer(args []string) error {
 		return nil
 	}
 	return err
+}
+
+// buildAutomations constructs the Phase 9 automation service + durable scheduler. It
+// returns nil (logging why) unless [automations] is enabled AND the runtime it needs
+// is present: a usable sbx runner (runs execute in the sandbox), the workspace
+// manager (ephemeral run workspaces), and the vault (granted-secret resolution +
+// redaction). The scheduler itself is started/stopped by the caller.
+func buildAutomations(a *app, srv *httpapi.Server, runner sandbox.Runner, ws *sandbox.WorkspaceManager, v *vault.Vault, provider llm.Provider) *autorun.Service {
+	if !a.cfg.Automations.Enabled {
+		return nil
+	}
+	switch {
+	case !a.cfg.Sandbox.Enabled || runner == nil || !runner.Available():
+		a.log.Warn("automations: disabled — [automations] needs an available sbx sandbox ([sandbox] enabled + installed)")
+		return nil
+	case ws == nil:
+		a.log.Warn("automations: disabled — the workspace manager is unavailable")
+		return nil
+	case v == nil:
+		a.log.Warn("automations: disabled — the secret vault is unavailable (needed for redaction/granted secrets)")
+		return nil
+	}
+	exec := autorun.ExecConfig{
+		Runner:          runner,
+		Secrets:         v,
+		Provider:        provider,
+		Audit:           a.store, // durable per-tool sandbox_runs audit (survives automation deletion)
+		NetworkIsolated: a.cfg.Sandbox.NetworkIsolated,
+		Limits: sandbox.Limits{
+			CPUs:    a.cfg.Sandbox.CPUs,
+			Memory:  a.cfg.Sandbox.Memory,
+			PIDs:    a.cfg.Sandbox.PIDs,
+			Timeout: a.cfg.Sandbox.TimeoutOr(5 * time.Minute),
+		},
+		Log: a.log,
+	}
+	// Avoid the typed-nil interface trap: only set Agents when the router truly exists.
+	if ar := srv.AgentRouter(); ar != nil {
+		exec.Agents = ar
+	}
+	concurrent := a.cfg.Automations.MaxConcurrentRuns
+	if concurrent == 0 {
+		concurrent = 16 // bounded by default so many due automations can't exhaust sbx
+	}
+	perUser := a.cfg.Automations.MaxRunsPerUser
+	if perUser == 0 {
+		perUser = 4
+	}
+	workspaceMB := a.cfg.Automations.MaxWorkspaceMB
+	if workspaceMB == 0 {
+		workspaceMB = 2048 // 2 GiB per-run scratch cap by default (watchdog kills overruns)
+	}
+	minFreeMB := a.cfg.Automations.MinFreeMB
+	if minFreeMB == 0 {
+		minFreeMB = 1024 // kill runs if the scratch filesystem drops below 1 GiB free (host-disk guard)
+	}
+	enabledPerUser := a.cfg.Automations.MaxEnabledPerUser
+	if enabledPerUser == 0 {
+		enabledPerUser = 100 // a user may have up to 100 automations enabled by default
+	}
+	svc := autorun.New(autorun.ServiceConfig{
+		Store:             a.store,
+		Exec:              exec,
+		Workspaces:        ws,
+		Caps:              automationCaps(a.cfg.Automations),
+		ArtifactDir:       filepath.Join(a.paths.Data, "automation-artifacts"),
+		Tick:              a.cfg.Automations.TickOr(5 * time.Second),
+		Eligibility:       srv.AutomationEligibility,
+		MaxConcurrentRuns: concurrent,
+		MaxRunsPerUser:    perUser,
+		MaxEnabledPerUser: enabledPerUser,
+		MaxWorkspaceBytes: int64(workspaceMB) << 20,
+		MinFreeBytes:      int64(minFreeMB) << 20,
+		Log:               a.log,
+	})
+	return svc
+}
+
+// automationCaps maps the [automations] config ceilings onto the engine caps,
+// applying sane defaults for any unset ceiling so a run is always bounded.
+func automationCaps(c config.AutomationsConfig) automation.Caps {
+	pick := func(v, def int) int {
+		if v <= 0 {
+			return def
+		}
+		return v
+	}
+	pick64 := func(v, def int64) int64 {
+		if v <= 0 {
+			return def
+		}
+		return v
+	}
+	return automation.Caps{
+		Timeout:          c.MaxTimeoutOr(30 * time.Minute),
+		MaxModelCalls:    pick(c.MaxModelCalls, 50),
+		MaxAgentRuns:     pick(c.MaxAgentRuns, 16),
+		MaxToolCalls:     pick(c.MaxToolCalls, 200),
+		MaxLogBytes:      pick64(c.MaxLogBytes, 10<<20),
+		MaxArtifactBytes: pick64(c.MaxArtifactByt, 50<<20),
+		MaxParallelism:   pick(c.MaxParallelism, 8),
+	}
 }
 
 // buildVault constructs the per-user secret vault, loading (or creating) the

@@ -7,6 +7,13 @@ import type {
   AdminUser,
   AgentCatalog,
   AgentLoginStarted,
+  AssistAutomationResponse,
+  AutomationDetail,
+  AutomationMeta,
+  AutomationRunDetail,
+  AutomationRunSummary,
+  AutomationSummary,
+  AutomationValidation,
   ConfigInfo,
   Conversation,
   LoginResponse,
@@ -14,6 +21,7 @@ import type {
   RTCStats,
   SandboxEnvironment,
   Secret,
+  TriggerAutomationResponse,
   Turn,
   User,
 } from "./api.gen";
@@ -154,4 +162,54 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ text, voice, lang }),
     }),
+
+  // Automations (Phase 9). The definition is the automation.v1 document; the server
+  // is authoritative for validation (it returns path-tagged issues for repair).
+  automationMeta: () => req<AutomationMeta>("/api/v1/automations/meta"),
+  listAutomations: (): Promise<AutomationSummary[]> =>
+    req<{ automations: AutomationSummary[] }>("/api/v1/automations").then(
+      (r) => r.automations ?? [],
+    ),
+  getAutomation: (id: string) =>
+    req<AutomationDetail>(`/api/v1/automations/${id}`),
+  createAutomation: (definition: unknown) =>
+    req<AutomationDetail>("/api/v1/automations", {
+      method: "POST",
+      body: JSON.stringify({ definition }),
+    }),
+  updateAutomation: (id: string, definition: unknown) =>
+    req<AutomationDetail>(`/api/v1/automations/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ definition }),
+    }),
+  deleteAutomation: (id: string) =>
+    req<void>(`/api/v1/automations/${id}`, { method: "DELETE" }),
+  validateAutomation: (definition: unknown) =>
+    req<AutomationValidation>("/api/v1/automations/validate", {
+      method: "POST",
+      body: JSON.stringify({ definition }),
+    }),
+  setAutomationEnabled: (id: string, enabled: boolean) =>
+    req<AutomationDetail>(`/api/v1/automations/${id}/enabled`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+  runAutomation: (id: string) =>
+    req<TriggerAutomationResponse>(`/api/v1/automations/${id}/run`, {
+      method: "POST",
+    }),
+  listAutomationRuns: (id: string): Promise<AutomationRunSummary[]> =>
+    req<{ runs: AutomationRunSummary[] }>(
+      `/api/v1/automations/${id}/runs`,
+    ).then((r) => r.runs ?? []),
+  getAutomationRun: (runId: string) =>
+    req<AutomationRunDetail>(`/api/v1/automation-runs/${runId}`),
+  assistAutomation: (prompt: string) =>
+    req<AssistAutomationResponse>("/api/v1/automations/assist", {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    }),
+  automationArtifactUrl: (artifactId: string) =>
+    `/api/v1/automation-artifacts/${artifactId}`,
+  automationExportUrl: (id: string) => `/api/v1/automations/${id}/export`,
 };

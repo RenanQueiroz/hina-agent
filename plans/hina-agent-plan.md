@@ -758,7 +758,6 @@ Initial `automation.v1` shape:
             "agent.cursor.run",
             "agent.pi.run"
         ],
-        "writable_paths": ["workspace", "tmp", "artifacts"],
         "secret_refs": ["github_token"],
         "agent_auth_refs": [
             "codex_browser",

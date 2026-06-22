@@ -4,7 +4,10 @@
 // stable; regenerate after changes (`make gen-ts`).
 package wire
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // User is the safe public projection of an account.
 type User struct {
@@ -354,6 +357,151 @@ type AdminAgents struct {
 	BrowserAuth bool                `json:"browser_auth_available"`
 	Reason      string              `json:"reason,omitempty"`
 	Profiles    []AdminAgentProfile `json:"profiles"`
+}
+
+// --- Phase 9: Automations ---
+
+// AutomationSummary is a list-row projection of an automation (no full definition).
+type AutomationSummary struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Enabled    bool       `json:"enabled"`
+	Trigger    string     `json:"trigger"` // interval | cron | manual
+	NextRun    *time.Time `json:"next_run,omitempty"`
+	LastRun    *time.Time `json:"last_run,omitempty"`
+	LastStatus string     `json:"last_status,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+}
+
+// AutomationList is the GET /automations response.
+type AutomationList struct {
+	Automations []AutomationSummary `json:"automations"`
+}
+
+// AutomationDetail is one automation with its full automation.v1 document.
+type AutomationDetail struct {
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	Enabled    bool            `json:"enabled"`
+	Trigger    string          `json:"trigger"`
+	NextRun    *time.Time      `json:"next_run,omitempty"`
+	LastRun    *time.Time      `json:"last_run,omitempty"`
+	LastStatus string          `json:"last_status,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+	Definition json.RawMessage `json:"definition"`
+}
+
+// AutomationInput is the create/update/import body: the automation.v1 document.
+type AutomationInput struct {
+	Definition json.RawMessage `json:"definition"`
+}
+
+// AutomationIssue is one structural or eligibility problem (path-tagged for repair).
+type AutomationIssue struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
+
+// AutomationValidation reports structural validity AND enable-eligibility separately,
+// so the builder can show "valid but not yet runnable" (missing secret/agent) clearly.
+type AutomationValidation struct {
+	Valid             bool              `json:"valid"`
+	Issues            []AutomationIssue `json:"issues,omitempty"`
+	Eligible          bool              `json:"eligible"`
+	EligibilityIssues []AutomationIssue `json:"eligibility_issues,omitempty"`
+}
+
+// SetAutomationEnabled is the POST /automations/{id}/enabled body.
+type SetAutomationEnabled struct {
+	Enabled bool `json:"enabled"`
+}
+
+// TriggerAutomationResponse is the POST /automations/{id}/run response.
+type TriggerAutomationResponse struct {
+	RunID string `json:"run_id"`
+}
+
+// AutomationRunSummary is a run-history row (no full record).
+type AutomationRunSummary struct {
+	ID           string     `json:"id"`
+	AutomationID string     `json:"automation_id"`
+	Status       string     `json:"status"`
+	Trigger      string     `json:"trigger"`
+	Error        string     `json:"error,omitempty"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	DurationMs   int64      `json:"duration_ms"`
+}
+
+// AutomationRunList is the GET /automations/{id}/runs response.
+type AutomationRunList struct {
+	Runs []AutomationRunSummary `json:"runs"`
+}
+
+// AutomationRunDetail is one run with its full immutable record + artifact metadata.
+type AutomationRunDetail struct {
+	ID           string                   `json:"id"`
+	AutomationID string                   `json:"automation_id"`
+	Status       string                   `json:"status"`
+	Trigger      string                   `json:"trigger"`
+	Error        string                   `json:"error,omitempty"`
+	StartedAt    *time.Time               `json:"started_at,omitempty"`
+	FinishedAt   *time.Time               `json:"finished_at,omitempty"`
+	DurationMs   int64                    `json:"duration_ms"`
+	Record       json.RawMessage          `json:"record"`
+	Artifacts    []AutomationArtifactInfo `json:"artifacts"`
+}
+
+// AutomationArtifactInfo is one promoted artifact's metadata (content via download).
+type AutomationArtifactInfo struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	StepID    string    `json:"step_id"`
+	Size      int64     `json:"size"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AutomationAgentOption is one callable agent's availability for the builder.
+type AutomationAgentOption struct {
+	Provider   string `json:"provider"`
+	Configured bool   `json:"configured"`
+	Runnable   bool   `json:"runnable"`
+}
+
+// AutomationMeta is the GET /automations/meta catalog the builder UI renders against:
+// the closed tool/adapter/host-service sets plus this owner's secrets + agent
+// availability and the server gates that decide eligibility.
+type AutomationMeta struct {
+	Enabled         bool                    `json:"enabled"`          // [automations] on
+	Available       bool                    `json:"available"`        // scheduler + sandbox usable
+	Reason          string                  `json:"reason,omitempty"` // why unavailable
+	SchemaVersion   string                  `json:"schema_version"`
+	Tools           []string                `json:"tools"`
+	Adapters        []string                `json:"adapters"`
+	HostServices    []string                `json:"host_services"`
+	Secrets         []string                `json:"secrets"`
+	Agents          []AutomationAgentOption `json:"agents"`
+	NetworkIsolated bool                    `json:"network_isolated"`
+	AgentsEnabled   bool                    `json:"agents_enabled"`
+}
+
+// AssistAutomationRequest asks the active LLM to draft an automation.v1 document from
+// a natural-language description.
+type AssistAutomationRequest struct {
+	Prompt string `json:"prompt"`
+}
+
+// AssistAutomationResponse returns the LLM-drafted, schema-validated definition (for
+// human review before enabling), the validation outcome, and how many attempts the
+// retry loop took.
+type AssistAutomationResponse struct {
+	Definition json.RawMessage   `json:"definition"` // always valid JSON ("null" if unparseable)
+	RawText    string            `json:"raw_text,omitempty"`
+	Valid      bool              `json:"valid"`
+	Issues     []AutomationIssue `json:"issues,omitempty"`
+	Attempts   int               `json:"attempts"`
 }
 
 // ErrorResponse is the shape of all error bodies.

@@ -19,6 +19,8 @@ import (
 	"github.com/RenanQueiroz/hina-agent/internal/agentauth"
 	"github.com/RenanQueiroz/hina-agent/internal/asr"
 	"github.com/RenanQueiroz/hina-agent/internal/auth"
+	"github.com/RenanQueiroz/hina-agent/internal/automation"
+	"github.com/RenanQueiroz/hina-agent/internal/autorun"
 	"github.com/RenanQueiroz/hina-agent/internal/config"
 	"github.com/RenanQueiroz/hina-agent/internal/events"
 	"github.com/RenanQueiroz/hina-agent/internal/id"
@@ -61,6 +63,9 @@ type Server struct {
 	// Phase 8 callable agents (installed via SetAgents; nil until then).
 	broker      *agentauth.Broker
 	agentRouter *sandbox.AgentRouter
+
+	// Phase 9 automations (installed via SetAutomations; nil until then).
+	automations *autorun.Service
 
 	turnMu      sync.Mutex      // guards activeTurns + pendingInterrupts
 	activeTurns map[string]bool // conversationID -> a turn is in flight
@@ -247,6 +252,26 @@ func (s *Server) awaitInterrupts(ctx context.Context, conversationID string) boo
 // Handler returns the configured HTTP handler.
 func (s *Server) Handler() http.Handler { return s.handler }
 
+// SetAutomations installs the Phase 9 automation service (post-construction). May be
+// nil ([automations] off); the automation endpoints then report unavailable. The
+// service owns the durable scheduler — the caller Starts/Stops it for lifecycle.
+func (s *Server) SetAutomations(svc *autorun.Service) { s.automations = svc }
+
+// Automations returns the installed automation service (nil when off), so the server
+// owner can Start/Stop the scheduler around the HTTP lifecycle.
+func (s *Server) Automations() *autorun.Service { return s.automations }
+
+// AgentRouter exposes the Phase 8 callable-agent router (nil when agents are off), so
+// the automation service can run agent_cli steps through the same hardened boundary.
+func (s *Server) AgentRouter() *sandbox.AgentRouter { return s.agentRouter }
+
+// AutomationEligibility assembles the runtime facts that decide whether an automation
+// may be enabled for a user (server gates + the owner's secrets/agents). Exposed so
+// the automation service can run the enable gate without duplicating catalog logic.
+func (s *Server) AutomationEligibility(ctx context.Context, userID string) (automation.Eligibility, error) {
+	return s.automationEligibility(ctx, userID)
+}
+
 // SetReady marks readiness (migrations done, config valid).
 func (s *Server) SetReady(v bool) { s.ready.Store(v) }
 
@@ -320,6 +345,25 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/agents/login/{sessionID}/events", s.requireUser(s.handleAgentLoginEvents))
 	mux.Handle("POST /api/v1/agents/login/{sessionID}/input", s.requireUser(s.handleAgentLoginInput))
 	mux.Handle("POST /api/v1/agents/login/{sessionID}/cancel", s.requireUser(s.handleAgentLoginCancel))
+
+	// Automations (Phase 9): per-user CRUD, validate, enable, manual run, run history,
+	// artifacts, the builder catalog, and LLM-assisted drafting.
+	mux.Handle("GET /api/v1/automations", s.requireUser(s.handleListAutomations))
+	mux.Handle("POST /api/v1/automations", s.requireUser(s.handleCreateAutomation))
+	mux.Handle("GET /api/v1/automations/meta", s.requireUser(s.handleAutomationMeta))
+	mux.Handle("POST /api/v1/automations/validate", s.requireUser(s.handleValidateAutomation))
+	mux.Handle("POST /api/v1/automations/assist", s.requireUser(s.handleAssistAutomation))
+	mux.Handle("GET /api/v1/automations/{id}", s.requireUser(s.handleGetAutomation))
+	mux.Handle("PUT /api/v1/automations/{id}", s.requireUser(s.handleUpdateAutomation))
+	mux.Handle("DELETE /api/v1/automations/{id}", s.requireUser(s.handleDeleteAutomation))
+	mux.Handle("GET /api/v1/automations/{id}/export", s.requireUser(s.handleExportAutomation))
+	mux.Handle("POST /api/v1/automations/{id}/enabled", s.requireUser(s.handleSetAutomationEnabled))
+	mux.Handle("POST /api/v1/automations/{id}/run", s.requireUser(s.handleRunAutomation))
+	mux.Handle("GET /api/v1/automations/{id}/runs", s.requireUser(s.handleListAutomationRuns))
+	// Run + artifact lookups are top-level paths so they don't collide with the
+	// /automations/{id}/... space (Go's ServeMux rejects ambiguous wildcard overlaps).
+	mux.Handle("GET /api/v1/automation-runs/{runID}", s.requireUser(s.handleGetAutomationRun))
+	mux.Handle("GET /api/v1/automation-artifacts/{artifactID}", s.requireUser(s.handleDownloadArtifact))
 
 	// Admin routes.
 	mux.Handle("GET /api/v1/admin/users", s.requireAdmin(s.handleListUsers))

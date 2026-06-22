@@ -53,6 +53,12 @@ var dangerousEnvPrefixes = []string{"LD_", "DYLD_", "DOCKER_", "BASH_FUNC_"}
 var dangerousEnvExact = map[string]struct{}{
 	"PATH": {}, "HOME": {}, "IFS": {}, "ENV": {}, "BASH_ENV": {}, "SHELLOPTS": {},
 	"PS4": {}, "PROMPT_COMMAND": {},
+	// gh routing vars: GH_HOST/GH_REPO redirect a bare owner/repo off github.com, and a config
+	// dir points gh at a hosts.yml defining arbitrary hosts — gh resolves that dir from
+	// GH_CONFIG_DIR, else XDG_CONFIG_HOME/gh (else APPDATA on Windows), so all three are
+	// forbidden; any would reroute a typed github.* tool past its validated github.com target.
+	// (The auth tokens GH_TOKEN/GITHUB_TOKEN are NOT here — those are the intended credential.)
+	"GH_HOST": {}, "GH_REPO": {}, "GH_CONFIG_DIR": {}, "XDG_CONFIG_HOME": {}, "APPDATA": {},
 }
 
 // DangerousEnvName reports whether name would be interpreted by the host loader /
@@ -65,9 +71,10 @@ func DangerousEnvName(name string) bool {
 			return true
 		}
 	}
-	// The whole *_PROXY suffix class (HTTP_PROXY, HTTPS_PROXY, FTP_PROXY, …) and the
-	// GIT_SSH* prefix class redirect host-side network / SSH transport.
-	if strings.HasSuffix(upper, "_PROXY") || strings.HasPrefix(upper, "GIT_SSH") {
+	// The whole *_PROXY suffix class (HTTP_PROXY, HTTPS_PROXY, FTP_PROXY, …) redirects
+	// host-side network resolution; the GIT_SSH* / GIT_CONFIG* prefix classes redirect git's
+	// SSH transport / inject git config (url.insteadOf can reroute an HTTPS fetch).
+	if strings.HasSuffix(upper, "_PROXY") || strings.HasPrefix(upper, "GIT_SSH") || strings.HasPrefix(upper, "GIT_CONFIG") {
 		return true
 	}
 	_, bad := dangerousEnvExact[upper]

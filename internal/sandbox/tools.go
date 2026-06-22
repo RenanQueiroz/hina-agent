@@ -173,7 +173,7 @@ func (r *Router) Handle(ctx context.Context, scope Scope, call ToolCall) (ToolRe
 	if err != nil {
 		return ToolResult{Err: "could not load secrets for redaction"}, nil
 	}
-	summary := summaryRedactor.Redact(op.summary)
+	summary := summaryRedactor.RedactText(op.summary)
 
 	// Enforce the network allow-list BEFORE touching the runner: a network-explicit
 	// tool that targets a host:port the policy doesn't allow is rejected. Both the
@@ -223,7 +223,7 @@ func (r *Router) Handle(ctx context.Context, scope Scope, call ToolCall) (ToolRe
 			// the fresh read fails, persist a generic command rather than the raw summary.
 			denySummary := "[redaction unavailable]"
 			if red, rerr := r.runRedactor(ctx, scope.UserID, summaryRedactor); rerr == nil {
-				denySummary = red.Redact(op.summary)
+				denySummary = red.RedactText(op.summary)
 			}
 			r.audit(scope, call.Name, "", decision, store.SandboxRun{Command: denySummary}, "")
 			r.emit(scope, events.TypeToolCallCompleted, map[string]any{
@@ -261,7 +261,7 @@ func (r *Router) Handle(ctx context.Context, scope Scope, call ToolCall) (ToolRe
 		// audit won't leak a secret, so refuse rather than proceed with a stale one.
 		return ToolResult{Err: "could not load secrets for redaction; refusing to run the tool"}, nil
 	}
-	summary = redactor.Redact(op.summary)
+	summary = redactor.RedactText(op.summary)
 
 	if !env.ToolAllowed(call.Name) {
 		r.audit(scope, call.Name, "", "blocked", store.SandboxRun{Command: summary}, "tool no longer permitted")
@@ -276,7 +276,7 @@ func (r *Router) Handle(ctx context.Context, scope Scope, call ToolCall) (ToolRe
 	// value equals the marker would slip that) and fail closed if any argv element
 	// embeds a secret value.
 	for _, a := range op.argv {
-		if redactor.ContainsSecret(a) {
+		if redactor.ContainsSecretText(a) { // plaintext OR JSON-escaped form
 			r.audit(scope, call.Name, "", "blocked", store.SandboxRun{Command: summary}, "argument contains a secret value")
 			return ToolResult{Err: "refusing to run: a tool argument contains a secret value (it would appear on the host command line)"}, nil
 		}

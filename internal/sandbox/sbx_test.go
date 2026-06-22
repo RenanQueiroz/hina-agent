@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/RenanQueiroz/hina-agent/internal/vault"
 )
 
 // fakeOpts controls the behavior baked into a fake `sbx` shim.
@@ -223,6 +226,31 @@ func TestRunSecretEnvNotInArgvAndRedacted(t *testing.T) {
 	}
 }
 
+// A tool that echoes json.Marshal(secret) must have that ESCAPED secret scrubbed from the
+// captured inline output AND the capture file — the real vault redactor's RedactBytes is
+// escaped-aware, so the escaped credential never lands in the run record/artifacts (round-74).
+func TestRunRedactsEscapedSecretInCapture(t *testing.T) {
+	skipOnWindows(t)
+	secret := "tok\nval\"x\\y"
+	esc, _ := json.Marshal(secret)
+	escBody := string(esc[1 : len(esc)-1]) // what the shim "echoes" (json.Marshal'd secret)
+	path, _ := fakeSbx(t, fakeOpts{stdout: "leak: " + escBody + " end"})
+	r := NewCLIRunner(Config{Path: path, OutputDir: t.TempDir()})
+	res, err := r.Run(context.Background(), RunSpec{
+		Tool: ToolShell, Argv: []string{"echo"}, Redactor: vault.NewRedactor([]string{secret}),
+	})
+	if err != nil || res.Err != nil {
+		t.Fatalf("run: err=%v res.Err=%v", err, res.Err)
+	}
+	if strings.Contains(res.Stdout, escBody) {
+		t.Fatalf("escaped secret leaked into inline output: %q", res.Stdout)
+	}
+	blob, _ := os.ReadFile(res.StdoutPath)
+	if strings.Contains(string(blob), escBody) {
+		t.Fatalf("escaped secret persisted unredacted in the capture file: %q", blob)
+	}
+}
+
 func TestRunTimeout(t *testing.T) {
 	skipOnWindows(t)
 	path, _ := fakeSbx(t, fakeOpts{sleep: "10"})
@@ -380,12 +408,13 @@ func TestVersionProbeTimeout(t *testing.T) {
 }
 
 func TestDangerousEnvName(t *testing.T) {
-	for _, bad := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DOCKER_HOST", "PATH", "HOME", "HTTP_PROXY", "FTP_PROXY", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "BASH_FUNC_x"} {
+	for _, bad := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DOCKER_HOST", "PATH", "HOME", "HTTP_PROXY", "FTP_PROXY", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_COUNT", "GH_HOST", "GH_REPO", "GH_CONFIG_DIR", "XDG_CONFIG_HOME", "APPDATA", "BASH_FUNC_x"} {
 		if !DangerousEnvName(bad) {
 			t.Fatalf("DangerousEnvName(%q) = false, want true", bad)
 		}
 	}
-	for _, ok := range []string{"API_KEY", "DB_PASSWORD", "MY_TOKEN", "PROXY_USER"} {
+	// The github auth tokens must remain INJECTABLE (they're the intended credential, not routing).
+	for _, ok := range []string{"API_KEY", "DB_PASSWORD", "MY_TOKEN", "PROXY_USER", "GITHUB_TOKEN", "GH_TOKEN"} {
 		if DangerousEnvName(ok) {
 			t.Fatalf("DangerousEnvName(%q) = true, want false", ok)
 		}

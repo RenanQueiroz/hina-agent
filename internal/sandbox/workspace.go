@@ -92,9 +92,23 @@ func (s Scratch) Remove() {
 	}
 }
 
+// Size returns the scratch directory's current byte usage (for a per-run disk watchdog).
+func (s Scratch) Size() (int64, error) { return dirSize(s.Dir) }
+
 // NewScratch creates a fresh ephemeral scratch directory for one run.
 func (w *WorkspaceManager) NewScratch() (Scratch, error) {
-	dir := filepath.Join(w.scratch, id.New("run"))
+	return w.NewScratchUnder("")
+}
+
+// NewScratchUnder creates a fresh ephemeral scratch directory under a SPECIFIC parent (e.g.
+// an automation run's already-watched agent-state root), so its disk use is accounted by a
+// watchdog polling that parent rather than by a sibling the per-run cap would miss. An empty
+// parent falls back to the shared scratch root (the normal per-run scratch).
+func (w *WorkspaceManager) NewScratchUnder(parent string) (Scratch, error) {
+	if parent == "" {
+		parent = w.scratch
+	}
+	dir := filepath.Join(parent, id.New("run"))
 	if err := platform.EnsurePrivateDir(dir); err != nil {
 		return Scratch{}, fmt.Errorf("sandbox: scratch: %w", err)
 	}

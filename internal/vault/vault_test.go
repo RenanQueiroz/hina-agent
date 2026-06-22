@@ -3,6 +3,7 @@ package vault
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -267,6 +268,67 @@ func TestMaterializeInvalidEnvName(t *testing.T) {
 	a, _ := v.Put(ctx, uid, "S", "", "v")
 	if _, err := v.Materialize(ctx, uid, []EnvGrant{{SecretID: a.ID, EnvName: "1bad name"}}); err == nil {
 		t.Fatal("expected error for an invalid env name")
+	}
+}
+
+// ContainsSecretText must catch a secret embedded in non-JSON text in its JSON-escaped form
+// (a newline/quote/backslash secret rendered into a prompt via a json.Marshal'd object) —
+// where a plaintext-only ContainsSecret would miss it (round-69).
+func TestRedactorContainsSecretText(t *testing.T) {
+	pem := "-----BEGIN-----\nmid\"q\\b\n-----END-----"
+	r := NewRedactor([]string{pem})
+	// Plaintext form: both catch it.
+	if !r.ContainsSecret(pem) || !r.ContainsSecretText(pem) {
+		t.Fatal("plaintext secret must be detected")
+	}
+	// JSON-escaped form (as a json.Marshal'd object value would render into a prompt).
+	obj, _ := json.Marshal(map[string]any{"key": pem})
+	prompt := "use this config: " + string(obj)
+	if r.ContainsSecret(prompt) {
+		t.Fatal("the escaped form should NOT match the plaintext check (precondition)")
+	}
+	if !r.ContainsSecretText(prompt) {
+		t.Fatal("ContainsSecretText must catch the JSON-escaped secret embedded in text")
+	}
+	// A benign string must not false-positive.
+	if r.ContainsSecretText("nothing secret here") {
+		t.Fatal("unexpected false positive")
+	}
+}
+
+// JSONContainsSecret/RedactJSON must catch a secret that is JSON-escaped INSIDE a decoded
+// string value (a prior tool that printed json.Marshal(secret), whose escaped form then rode
+// into a later JSON payload) — the decoded-string check must be escaped-aware (round-73).
+func TestRedactorJSONStringEscapedSecret(t *testing.T) {
+	pem := "a\nb\"c\\d"
+	r := NewRedactor([]string{pem})
+	inner, _ := json.Marshal(pem) // the escaped form a tool would emit: "a\nb\"c\\d"
+	outer, _ := json.Marshal(map[string]string{"v": string(inner)})
+	if !r.JSONContainsSecret(outer) {
+		t.Fatal("JSONContainsSecret must catch a secret escaped inside a JSON string value")
+	}
+	red := r.RedactJSON(outer)
+	escBody := string(inner[1 : len(inner)-1]) // the escaped secret body
+	if strings.Contains(string(red), escBody) {
+		t.Fatalf("RedactJSON must scrub the escaped secret inside the string value, got %s", red)
+	}
+}
+
+// Captured-output redaction (RedactBytes) must scrub a secret in its JSON-escaped form too —
+// a tool/agent that echoes json.Marshal(secret) must not persist it into a capture file / run
+// record / artifact — and MaxValueLen must cover the (longer) escaped length so the truncation
+// margin stays safe (round-74).
+func TestRedactorRedactBytesEscaped(t *testing.T) {
+	secret := "tok\nval\"x\\y"
+	r := NewRedactor([]string{secret})
+	esc, _ := json.Marshal(secret)
+	escBody := string(esc[1 : len(esc)-1]) // the form a tool echoing json.Marshal(secret) prints
+	out := string(r.RedactBytes([]byte("logged: " + escBody + " end")))
+	if strings.Contains(out, escBody) {
+		t.Fatalf("RedactBytes must scrub the JSON-escaped secret, got %q", out)
+	}
+	if r.MaxValueLen() < len(escBody) {
+		t.Fatalf("MaxValueLen %d must cover the escaped length %d (truncation margin)", r.MaxValueLen(), len(escBody))
 	}
 }
 

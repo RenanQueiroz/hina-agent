@@ -123,11 +123,76 @@ type agentArgs struct {
 	Schema     json.RawMessage `json:"schema"`
 }
 
-// Handle routes one agent-run tool call and returns the normalized result fed back
-// to the model. Like Router.Handle it returns a Go error ONLY for a context
-// cancellation the loop must treat as an interrupt; every expected failure (not
-// configured, denied, runtime unavailable) comes back in ToolResult.Err.
+// AgentRunOptions lets a TRUSTED caller (the Phase 9 automation runtime) override how
+// an agent run is workspaced + approved. The interactive path passes the zero value.
+//   - Workspace: a SERVER-CREATED host dir mounted read-write at /workspace instead of
+//     the user's durable workspace (e.g. the automation run's ephemeral scratch). It
+//     must be a path the server owns — NEVER a model/definition-controlled value.
+//   - Workdir: the working directory inside the container (e.g. "/workspace/pr-42");
+//     the caller is responsible for keeping it under /workspace.
+//   - AutoApprove: skip the interactive approval gate (an unattended automation run has
+//     no human to prompt). The run is still fully audited.
+type AgentRunOptions struct {
+	Workspace   string
+	Workdir     string
+	AutoApprove bool
+	// Limits, when non-zero, caps this run's resources (the automation's sandbox.resources)
+	// instead of the AgentRouter's global limits.
+	Limits Limits
+	// StateRoot, when set, roots the run's credential-store + staging scratch dirs under THIS
+	// directory instead of a fresh sibling scratch. The automation runtime passes a per-run
+	// dir it ALSO watches (but does NOT mount at /workspace), so the agent's RW credential dir
+	// counts toward the per-run disk cap yet stays invisible to sibling/parallel steps.
+	StateRoot string
+}
+
+// agentRunOptions is the internal form threaded through the shared run core.
+type agentRunOptions struct {
+	workspace   string
+	workdir     string
+	autoApprove bool
+	limits      Limits
+	hasLimits   bool
+	stateRoot   string // roots the credential/staging scratch (watched, not /workspace-mounted)
+	// automation marks the unattended automation path. It is bound by the automation's OWN
+	// sandbox profile, so it does NOT consult the user's INTERACTIVE Sandbox Environment
+	// tool allow-list (every other gate — provider allow-list, profile/auth, network
+	// isolation, redaction, lock, quota, audit — still applies identically).
+	automation bool
+}
+
+// Handle routes one agent-run tool call (the interactive model-driven path) and
+// returns the normalized result fed back to the model. Like Router.Handle it returns a
+// Go error ONLY for a context cancellation the loop must treat as an interrupt; every
+// expected failure (not configured, denied, runtime unavailable) comes back in
+// ToolResult.Err.
 func (ar *AgentRouter) Handle(ctx context.Context, scope Scope, call ToolCall) (ToolResult, error) {
+	return ar.handle(ctx, scope, call, agentRunOptions{})
+}
+
+// HandleAutomation runs an agent for the unattended automation runtime: it reuses the
+// EXACT same credential resolution / mount / redaction / audit / launch-fence boundary
+// as Handle, but mounts the run's own (server-created) workspace, runs in the given
+// workdir, and auto-approves (no human is present). opts.Workspace must be a path the
+// server controls.
+func (ar *AgentRouter) HandleAutomation(ctx context.Context, scope Scope, call ToolCall, opts AgentRunOptions) (ToolResult, error) {
+	// Fail closed: the automation path MUST supply its own (server-created) workspace —
+	// an empty value would fall back to the user's durable workspace, which an unattended
+	// auto-approved run must never touch.
+	if opts.Workspace == "" {
+		return ToolResult{Err: "automation agent run requires an explicit run workspace"}, nil
+	}
+	zeroLimits := Limits{}
+	return ar.handle(ctx, scope, call, agentRunOptions{
+		workspace: opts.Workspace, workdir: opts.Workdir, autoApprove: opts.AutoApprove,
+		limits: opts.Limits, hasLimits: opts.Limits != zeroLimits, automation: true,
+		stateRoot: opts.StateRoot,
+	})
+}
+
+// handle is the shared agent-run core. opts is the zero value for the interactive
+// path; the automation path supplies a workspace/workdir override + auto-approve.
+func (ar *AgentRouter) handle(ctx context.Context, scope Scope, call ToolCall, opts agentRunOptions) (ToolResult, error) {
 	provider, ok := agentcli.ProviderFromToolName(call.Name)
 	if !ok {
 		return ToolResult{Err: fmt.Sprintf("%q is not a callable-agent tool", call.Name)}, nil
@@ -154,15 +219,17 @@ func (ar *AgentRouter) Handle(ctx context.Context, scope Scope, call ToolCall) (
 		return ToolResult{Err: "agent runs are disabled unless [sandbox] network_isolated=true (the operator must assert the sandbox's network egress is controlled — a coding-agent run sends data to its provider and Hina can't gate that egress itself)"}, nil
 	}
 
-	// Enforce the user's Sandbox Environment tool allow-list (the SAME per-user gate
-	// the raw Router applies): a user who removes agent.<provider>.run from their
-	// policy blocks the model from invoking it, even with a configured profile. Loaded
-	// here pre-approval and re-checked under the lock below.
+	// Enforce the user's INTERACTIVE Sandbox Environment tool allow-list — but ONLY for the
+	// interactive (model-driven) path. A user who removes agent.<provider>.run from their
+	// policy blocks the model from invoking it. An AUTOMATION is bound by its own sandbox
+	// profile + agent_auth_refs instead, so it does NOT consult this interactive gate
+	// (otherwise running a scheduled agent would force widening the unrelated chat trust
+	// boundary). Loaded here pre-approval and re-checked under the lock below.
 	env, err := ar.base.environment(ctx, scope.UserID)
 	if err != nil {
 		return ToolResult{Err: "could not load sandbox policy"}, nil
 	}
-	if !env.ToolAllowed(call.Name) {
+	if !opts.automation && !env.ToolAllowed(call.Name) {
 		ar.base.audit(scope, call.Name, "", "blocked", store.SandboxRun{}, "tool not permitted")
 		return ToolResult{Err: fmt.Sprintf("tool %q is not permitted by your Sandbox Environment policy", call.Name)}, nil
 	}
@@ -211,7 +278,7 @@ func (ar *AgentRouter) Handle(ctx context.Context, scope Scope, call ToolCall) (
 	}
 	summary := genericAgentSummary(provider, profile.AuthType)
 	if credErr == nil {
-		summary = agentSummary(provider, profile.AuthType, summaryRed.Redact(req.Prompt))
+		summary = agentSummary(provider, profile.AuthType, summaryRed.RedactText(req.Prompt))
 	}
 
 	callID := id.New("tcl")
@@ -221,7 +288,7 @@ func (ar *AgentRouter) Handle(ctx context.Context, scope Scope, call ToolCall) (
 	}
 
 	decision := "auto"
-	if ar.base.cfg.Approval == ApprovalAlways {
+	if ar.base.cfg.Approval == ApprovalAlways && !opts.autoApprove {
 		if ar.base.cfg.Approver == nil {
 			return ToolResult{Err: "tool approval is required but no approver is configured"}, nil
 		}
@@ -248,7 +315,7 @@ func (ar *AgentRouter) Handle(ctx context.Context, scope Scope, call ToolCall) (
 				// Redact the FULL prompt over {current vaulted + current cred + pre-approval
 				// cred}, THEN truncate — so neither an old nor a new credential, nor one
 				// straddling the length cap, survives in the denied audit row.
-				denySummary = agentSummary(provider, profile.AuthType, cur.Redact(req.Prompt))
+				denySummary = agentSummary(provider, profile.AuthType, cur.RedactText(req.Prompt))
 			}
 			ar.base.audit(scope, call.Name, "", "denied", store.SandboxRun{Command: denySummary}, "")
 			ar.base.emit(scope, events.TypeToolCallCompleted, map[string]any{
@@ -316,25 +383,30 @@ func (ar *AgentRouter) Handle(ctx context.Context, scope Scope, call ToolCall) (
 	// agent credential) before ANY blocked/pending audit uses it — so a credential a
 	// prompt embeds can't land in an audit row, even one rotated during the approval.
 	// Redact the FULL prompt BEFORE truncating (agentSummary truncates), so a credential
-	// straddling the summary length cap can't leave an unredactable prefix.
-	summary = agentSummary(provider, profile.AuthType, redactor.Redact(req.Prompt))
+	// straddling the summary length cap can't leave an unredactable prefix. RedactText scrubs
+	// the JSON-escaped form too, so an escaped credential the argv guard blocks (or that reaches
+	// the run-time audit) is never persisted unredacted in sandbox_runs.command.
+	summary = agentSummary(provider, profile.AuthType, redactor.RedactText(req.Prompt))
 
-	// Re-check the Sandbox Environment tool allow-list UNDER THE LOCK (a tool removed
-	// during the window is honored), auditing the now-current summary.
+	// Re-check the interactive Sandbox Environment tool allow-list UNDER THE LOCK (a tool
+	// removed during the window is honored), auditing the now-current summary. Skipped for
+	// the automation path, which is not bound by the interactive policy.
 	env, err = ar.base.environment(ctx, scope.UserID)
 	if err != nil {
 		return ToolResult{Err: "could not load sandbox policy"}, nil
 	}
-	if !env.ToolAllowed(call.Name) {
+	if !opts.automation && !env.ToolAllowed(call.Name) {
 		ar.base.audit(scope, call.Name, "", "blocked", store.SandboxRun{Command: summary}, "tool no longer permitted")
 		return ToolResult{Err: fmt.Sprintf("tool %q is no longer permitted by your Sandbox Environment policy", call.Name)}, nil
 	}
 
-	// Guard: no argv element (notably the prompt) may carry a secret value — it would
-	// land on the host `sbx` command line. Fail closed (exact substring, not "redaction
-	// changed it", so a value equal to the marker can't slip).
+	// Guard: no argv element (notably the prompt) may carry a secret value — it would land on
+	// the host `sbx` command line AND be sent to the agent provider. ContainsSecretText also
+	// catches a secret in its JSON-escaped form, so a `\n`/`\"`/`\\`-escaped credential that a
+	// template rendered into the prompt (via a json.Marshal'd object value) can't slip past a
+	// plaintext-only check. Fail closed (exact substring, so a value equal to the marker can't slip).
 	for _, a := range plan.Argv {
-		if redactor.ContainsSecret(a) {
+		if redactor.ContainsSecretText(a) {
 			ar.base.audit(scope, call.Name, "", "blocked", store.SandboxRun{Command: summary}, "argument contains a secret value")
 			return ToolResult{Err: "refusing to run: an argument (e.g. the prompt) contains a secret value (it would appear on the host command line)"}, nil
 		}
@@ -350,18 +422,31 @@ func (ar *AgentRouter) Handle(ctx context.Context, scope Scope, call ToolCall) (
 		}
 	}
 
-	workspace, err := ar.base.cfg.Workspaces.UserWorkspace(scope.UserID)
-	if err != nil {
-		return ToolResult{Err: "could not prepare workspace"}, nil
+	// Workspace mounted read-write at /workspace: the automation runtime supplies its
+	// own (server-created) run scratch so an unattended agent run NEVER reads/writes the
+	// user's durable workspace; the interactive path uses the durable workspace.
+	workspace := opts.workspace
+	if workspace == "" {
+		workspace, err = ar.base.cfg.Workspaces.UserWorkspace(scope.UserID)
+		if err != nil {
+			return ToolResult{Err: "could not prepare workspace"}, nil
+		}
 	}
 
 	// Materialize the credential-store mount (always present so the CLI has a writable
 	// home): the decrypted browser/subscription store, or a fresh empty dir.
-	stateScratch, mount, err := ar.prepareStateMount(credBlob, provider, req.AuthType, adapter)
+	stateScratch, mount, err := ar.prepareStateMount(credBlob, provider, req.AuthType, adapter, opts.stateRoot)
 	if err != nil {
 		return ToolResult{Err: "could not prepare the agent credential store"}, nil
 	}
-	defer stateScratch.Remove()
+	// When the caller supplied a StateRoot (the automation runtime), the scratch lives under
+	// that caller-owned, watchdog-counted dir — DON'T remove it here, or a fast over-cap write
+	// to the credential mount would be cleaned up before the run's final disk check sees it.
+	// The automation runtime removes the whole StateRoot after that check. The interactive path
+	// (no StateRoot) owns a sibling scratch and must clean it up itself.
+	if opts.stateRoot == "" {
+		defer stateScratch.Remove()
+	}
 	// The browser-state store's token redactor is already folded into `redactor` via
 	// materializeCredential (built from the authoritative blob, before the argv guard).
 
@@ -394,17 +479,25 @@ func (ar *AgentRouter) Handle(ctx context.Context, scope Scope, call ToolCall) (
 	// host follow a symlink and overwrite a file outside sbx. Done AFTER quota + the
 	// pending audit so no host-side mutation precedes the audited gate.
 	mounts := []Mount{mount}
-	stagingScratch, stagingMount, hasStaging, serr := ar.prepareStaging(plan.Files)
+	stagingScratch, stagingMount, hasStaging, serr := ar.prepareStaging(plan.Files, opts.stateRoot)
 	if serr != nil {
 		ar.log.Warn("agent: stage files failed", "err", serr)
 		_ = ar.base.finalizeRun(store.SandboxRun{ID: auditID, ExitCode: -1, Error: "could not stage agent run files"})
 		return ToolResult{Err: "could not stage agent run files"}, nil
 	}
 	if hasStaging {
-		defer stagingScratch.Remove()
 		mounts = append(mounts, stagingMount)
+		// Same as the state scratch: leave a StateRoot-rooted staging dir for the automation
+		// runtime's final disk check + cleanup; only the interactive path removes its own.
+		if opts.stateRoot == "" {
+			defer stagingScratch.Remove()
+		}
 	}
 
+	runLimits := ar.cfg.Limits
+	if opts.hasLimits {
+		runLimits = opts.limits // the automation's sandbox.resources cap this run
+	}
 	spec := RunSpec{
 		UserID:         scope.UserID,
 		ConversationID: scope.ConversationID,
@@ -414,8 +507,9 @@ func (ar *AgentRouter) Handle(ctx context.Context, scope Scope, call ToolCall) (
 		SecretEnv:      secretEnv,
 		Redactor:       redactor,
 		Workspace:      workspace,
+		Workdir:        opts.workdir,
 		Mounts:         mounts,
-		Limits:         ar.cfg.Limits,
+		Limits:         runLimits,
 	}
 
 	// Final launch fence. The credential was materialized earlier; a logout could have
@@ -521,10 +615,32 @@ func (ar *AgentRouter) Handle(ctx context.Context, scope Scope, call ToolCall) (
 		return ToolResult{Err: redactor.Redact(runErr.Error())}, nil
 	}
 
+	// For an UNATTENDED automation run, the parsed result feeds later steps that auto-act on
+	// it — so it must reflect the COMPLETE output, not the 64 KiB model-display inline stream.
+	// Fail closed if the output couldn't be captured or exceeded the (1 MiB) capture cap, and
+	// otherwise parse the full redacted capture FILE (same redaction as the inline stream).
+	// The interactive path keeps the inline stream (the model sees that anyway).
+	stdout := res.Stdout
+	if opts.automation {
+		if res.CaptureErr != "" {
+			return ToolResult{Err: "agent output could not be captured; refusing to act on incomplete output"}, nil
+		}
+		if res.StdoutTruncated {
+			return ToolResult{Err: "agent output exceeded the capture limit; refusing to act on truncated output"}, nil
+		}
+		if res.StdoutPath != "" {
+			full, rerr := os.ReadFile(res.StdoutPath)
+			if rerr != nil {
+				return ToolResult{Err: "could not read the captured agent output; refusing to act on incomplete output"}, nil
+			}
+			stdout = string(full)
+		}
+	}
+
 	// Normalize the captured output into an AgentRunResult, then redact every
 	// model-visible field over the run-time redactor.
 	parsed := adapter.Parse(provider, agentcli.RawResult{
-		Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode,
+		Stdout: stdout, Stderr: res.Stderr, ExitCode: res.ExitCode,
 		TimedOut: res.TimedOut, Duration: res.Duration,
 		StdoutPath: res.StdoutPath, StderrPath: res.StderrPath,
 	})
@@ -732,9 +848,9 @@ func tokenRedactor(data []byte) (*vault.Redactor, error) {
 // the CLI has a writable HOME/config dir): for a browser/subscription profile the
 // decrypted store unpacked into a fresh owner-private scratch dir, otherwise an empty
 // scratch dir. The scratch is mounted read-write at the adapter's container path.
-func (ar *AgentRouter) prepareStateMount(blob []byte, provider agentcli.Provider, authType agentcli.AuthType, adapter agentcli.Adapter) (Scratch, Mount, error) {
+func (ar *AgentRouter) prepareStateMount(blob []byte, provider agentcli.Provider, authType agentcli.AuthType, adapter agentcli.Adapter, stateRoot string) (Scratch, Mount, error) {
 	cs := adapter.CredStore()
-	scratch, err := ar.base.cfg.Workspaces.NewScratch()
+	scratch, err := ar.base.cfg.Workspaces.NewScratchUnder(stateRoot)
 	if err != nil {
 		return Scratch{}, Mount{}, err
 	}
@@ -1010,11 +1126,11 @@ func parseAgentArgs(raw json.RawMessage) (agentcli.RunRequest, error) {
 // false (and no scratch) when there are no files. Writing into a fresh dir (whose every
 // component we create) means no pre-existing symlink can redirect a host write outside
 // the sandbox.
-func (ar *AgentRouter) prepareStaging(files []agentcli.StagedFile) (Scratch, Mount, bool, error) {
+func (ar *AgentRouter) prepareStaging(files []agentcli.StagedFile, stateRoot string) (Scratch, Mount, bool, error) {
 	if len(files) == 0 {
 		return Scratch{}, Mount{}, false, nil
 	}
-	scratch, err := ar.base.cfg.Workspaces.NewScratch()
+	scratch, err := ar.base.cfg.Workspaces.NewScratchUnder(stateRoot)
 	if err != nil {
 		return Scratch{}, Mount{}, false, err
 	}
@@ -1076,18 +1192,20 @@ func agentSummary(provider agentcli.Provider, authType, redactedPrompt string) s
 // run-time redactor (the CLI could echo a secret into its final text, structured
 // output, an error, or a changed-file path).
 func redactAgentResult(res *agentcli.AgentRunResult, red *vault.Redactor) {
-	res.FinalText = red.Redact(res.FinalText)
-	res.Err = red.Redact(res.Err)
+	// RedactText (not Redact) on the text fields: an agent that echoed json.Marshal of a
+	// credential would otherwise persist the escaped form into the result/run record.
+	res.FinalText = red.RedactText(res.FinalText)
+	res.Err = red.RedactText(res.Err)
 	if len(res.Structured) > 0 {
 		// The structured field is raw JSON — DECODE + redact string values so a secret
 		// under any valid escaping is caught (not just the plaintext substring).
 		res.Structured = json.RawMessage(red.RedactJSON(res.Structured))
 	}
 	for i, f := range res.ChangedFiles {
-		res.ChangedFiles[i] = red.Redact(f)
+		res.ChangedFiles[i] = red.RedactText(f)
 	}
 	for i, tc := range res.ToolCalls {
-		res.ToolCalls[i].Name = red.Redact(tc.Name)
-		res.ToolCalls[i].Input = red.Redact(tc.Input)
+		res.ToolCalls[i].Name = red.RedactText(tc.Name)
+		res.ToolCalls[i].Input = red.RedactText(tc.Input)
 	}
 }

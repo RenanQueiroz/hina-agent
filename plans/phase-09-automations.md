@@ -1,6 +1,8 @@
 # Phase 9 — Automations
 
-Status: ready after Phases 7 + 8.
+Status: **complete** (2026-06-21) — `automation.v1` schema + validator + eligibility, the bounded selector/template engine, interval/cron scheduling, the deterministic-then-model step engine + immutable run records, the durable server-up-only scheduler (resume + missed-run skip/run_once + concurrency + clean shutdown), the deterministic tools + agent_cli/llm executor, the per-user HTTP CRUD/run/artifact API, the on-rails builder UI (import/export + LLM-assist), and the C4 semantics decisions. The engine + scheduler are exhaustively unit-tested with fakes (the PR-review automation runs end-to-end against a fake executor); real `sbx`/CLI container validation — the live `gh`/agent runs and per-run agent workspaces — is deferred to an `sbx`-equipped host (the Phase 8 precedent), and `mcp.call` execution + Windows validation stay deferred.
+
+Status (original): ready after Phases 7 + 8.
 Depends on: Phase 7 (sandboxes + secrets), Phase 8 (callable agents), Phase 2 (LLM + builder UI stack).
 Unblocks: the product's headline differentiator (scheduled unattended workflows).
 
@@ -33,12 +35,14 @@ Automation semantics still to nail down before promising portable imports are in
 Scheduler + schema + runner are cross-platform; the sandbox/agent execution underneath is Windows-validated in Phase 12. Automations marked supported on Windows only after that.
 
 ## Testable exit criteria (Linux/macOS this phase)
-- [ ] Create the GitHub PR-review Automation in the builder; it emits valid `automation.v1`; export/import round-trips with redacted secrets (only `secret_refs`).
-- [ ] Interval trigger fires while the server is up; a deterministic `gh`/notifications check that finds nothing **finishes without waking any LLM**.
-- [ ] When a PR matches: per-PR sandbox checkout → parallel agent reviews (per the user's configured/available agents) → aggregation `llm` step → final combined review posted/drafted; each agent report saved as an artifact; immutable run record captures everything.
-- [ ] Server restart resumes enabled schedules and recomputes next run; a run in flight at shutdown stops cleanly with nothing lingering.
-- [ ] LLM-assisted creation produces schema-valid JSON (with retry on validation errors) and requires review before enabling.
-- [ ] Budgets/concurrency/missed-run `skip` all enforced; an Automation referencing an unavailable agent/secret fails validation.
+- [x] Create the GitHub PR-review Automation in the builder (one-click template); it emits valid `automation.v1`; export/import round-trips with redacted secrets (only `secret_refs`). (`automation` parse/validate/export tests + `web/src/lib/automations.test.ts` + the builder UI.)
+- [x] Interval trigger fires while the server is up; a deterministic `gh`/notifications check that finds nothing **finishes without waking any LLM**. (`TestRunEmptyNotificationsSkipsWithoutModel` asserts zero model/agent calls; `autorun` scheduler tests fire on a tick.)
+- [x] When a PR matches: per-PR sandbox checkout → parallel agent reviews (each agent runs in the run's scratch at the checkout's workdir) → aggregation `llm` step → final combined review posted/drafted; each agent report saved as an artifact; immutable run record captures everything. (`TestRunOnePRFullFlow` end-to-end against a fake executor; `TestAgentRunAutomationOverride` proves the workspace/workdir/auto-approve/limits plumbing; real container runs deferred to an `sbx` host.)
+- [x] Server restart resumes enabled schedules and recomputes next run; a run in flight at shutdown stops cleanly with nothing lingering. (`reconcile` + `TestServiceStopCancelsInFlight` + `MarkRunningRunsInterrupted`.)
+- [x] LLM-assisted creation produces schema-valid JSON (with retry on validation errors) and requires review before enabling. (`autorun.Assist` retry loop; create/update always store disabled.)
+- [x] Budgets/concurrency/missed-run `skip` all enforced; an Automation referencing an unavailable agent/secret fails validation. (`TestRunAgentBudgetEnforced`, `TestServiceSkipIfRunning`, `TestServiceReconcileMissedSkip`/`RunOnce`, `eligibility_test.go`.)
+
+> Note (faithful-reuse choice): `agent_cli` steps reuse the 31-rounds-hardened Phase 8 `AgentRouter` rather than re-implementing credential mounting. A small `AgentRouter.HandleAutomation` entry runs them **unattended** (auto-approve, no human gate) in the automation's **own ephemeral run scratch** (never the owner's durable workspace), with `workspace_from` mapped to a workdir validated to stay under `/workspace`, and the automation's `sandbox.resources` capping the run. Deterministic tool steps likewise execute under the automation's own profile (network + CLI allow-list enforced at run time) via the `sbx` Runner, and a tool step's `workspace_from` is honored the same way — the resolved path is validated to stay under `/workspace` and set as the command's working directory (so a `shell.exec` after a `github.pr_checkout` runs *in* the checkout, not the run root). Only the **live container/CLI execution** (the real `gh`/agent runs) is deferred to an `sbx`-equipped host.
 
 ## Risks & mitigations
 - **External side effects from powerful Automations** → visible permissions/secrets/network/outputs before enable; argv-first tools; human review of LLM-generated JSON.

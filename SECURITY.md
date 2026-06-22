@@ -29,8 +29,9 @@ documented unattended-Automation decryption boundary, etc.) is described in
 [`plans/hina-agent-plan.md`](plans/hina-agent-plan.md) and
 [`plans/research-findings.md`](plans/research-findings.md).
 
-As of Phase 8 the per-user boundary (`internal/sandbox`, `internal/vault`) and the
-callable-agent layer (`internal/agentcli`, `internal/agentauth`) are implemented:
+As of Phase 9 the per-user boundary (`internal/sandbox`, `internal/vault`), the
+callable-agent layer (`internal/agentcli`, `internal/agentauth`), and the Automations
+layer (`internal/automation`, `internal/autorun`) are implemented:
 
 - **Secret vault.** Envelope encryption — a per-secret AES-256-GCM data key wraps
   each value and is itself wrapped by a local master key
@@ -101,3 +102,96 @@ callable-agent layer (`internal/agentcli`, `internal/agentauth`) are implemented
   **Pi** is the local-only, account-free agent: it targets only Hina's host-inference
   proxy (never a cloud provider) and stays disabled until Phase 11 provides that
   endpoint. The whole callable-agent layer is gated off on Windows until Phase 12.
+- **Automations (unattended scheduled runs).** A user-owned `automation.v1` workflow
+  runs **unattended** while the server is up, so its confirmation gates are different
+  from interactive use: (1) **mandatory human review before `enabled` flips true** —
+  every automation is created and updated **disabled** (and a **manual run is refused
+  while disabled** — the review gate can't be skipped via the Run button), and an enable runs an
+  **eligibility** check (each tool is in the profile's allow-list, each `agent_cli`
+  adapter is granted + authenticated + server-allowed, each `secret_ref` exists, and
+  any agent/secret use requires `network_isolated`) — and that **same eligibility check
+  is re-run immediately before every scheduled fire**, so a run whose dependency went
+  away since enable (a deleted secret, a de-authenticated agent, a flipped gate) is
+  recorded as failed instead of executing under a stale posture; (2) the automation's **own
+  sandbox permission profile** — the run is bound by *that*, not the owner's
+  interactive chat policy. There is **no per-step approval card** at run time (no human
+  is present at 03:00); instead every step is recorded in an **immutable run record**
+  and tool/agent runs execute auto-approved but fully audited. Deterministic tool steps
+  are built **argv-first** by typed adapters (`github.*`/`http.request`/`shell.exec`; a
+  shell *string* needs an unrestricted profile) and run through the same `sbx` Runner
+  with granted-secret **redaction** over captured output and the same
+  **`network_isolated` fail-closed gate** on secret injection. That gate also covers **any
+  network-capable deterministic tool** (`http.request`/`github.*`/`shell.exec`) **and every
+  `llm` step** (an outward prompt+inputs flow to a possibly-cloud provider): such a step
+  is refused — at enable-time eligibility *and* run time — unless `network_isolated=true`. An
+  `llm` step additionally **refuses to run if its prompt or resolved inputs contain a vaulted
+  secret value** (the same fail-closed check a tool/agent gets on its arguments): the provider
+  call is server-side and outside the `sbx` egress gate, so a credential must never be
+  transmitted to a (possibly cloud) model. Separately, the typed `http.request` tool is
+  **SSRF-guarded** by refusing a
+  target host that is a loopback, link-local, cloud-metadata (`169.254.169.254`),
+  unspecified, or private-range address — including the legacy `inet_aton` numeric forms
+  (decimal/hex/octal/shortened) `getaddrinfo` accepts — or `localhost`, in **every** profile
+  mode. A LITERAL bad/internal URL is additionally rejected at **enable-time** validation
+  (early), so a hardcoded one never reaches a run. The guard deliberately does **not** resolve
+  DNS hostnames (a rebinding TOCTOU — a name that passes a pre-resolution check can re-resolve to
+  an internal address before the sandboxed `curl` connects), so a hostname that resolves to an
+  internal address is **not** contained in-process. Containing it is a **hard `sbx`-host
+  prerequisite**: the locked-down container egress that `network_isolated` asserts (and which the
+  fail-closed gate REQUIRES before any networked tool runs) must block private/link-local/
+  loopback/metadata destinations. That egress policy — and a test proving it blocks a
+  DNS-to-internal target — is part of the **deferred `sbx`-host validation** (the same host on
+  which the real container/CLI runs are exercised), not the CGo-free control-plane build. So
+  an unattended automation can't be turned into a server-side probe of internal services (a
+  raw `shell` string's egress isn't parseable here and likewise stays bounded by the `sbx`
+  container's own egress policy). The typed `github.*` PR tools additionally **pin the repo to
+  a bare `owner/repo`** (no host prefix, URL, or extra path), so a user-controlled repo string
+  can't route `gh`/`git` to a GHES/arbitrary/internal host outside the declared GitHub target.
+  A run that survives a definition change between being claimed and
+  executing is detected by a **monotonic generation counter** and finalized cancelled, so
+  a stale scheduled occurrence never runs an edited/re-enabled definition off-schedule; `agent_cli` steps run
+  through the Phase 8 `AgentRouter` (`HandleAutomation`), inheriting its full
+  credential/redaction/audit/`network_isolated`/provider-allow-list/lock/quota boundary —
+  but bound by the automation's **own** `sandbox` profile + `agent_auth_refs`, **not** the
+  owner's *interactive* Sandbox Environment tool allow-list (so a scheduled agent run never
+  forces the user to widen their chat trust boundary; the interactive `Handle` path still
+  honors that policy) — and **auto-approved** (unattended) in the
+  automation's **own ephemeral run scratch** (never the owner's durable workspace;
+  an empty workspace is refused, not silently downgraded), at a `workspace_from`
+  workdir validated to stay under `/workspace`, and capped by the automation's
+  `sandbox.resources` (not the broader server agent limits). Per-run **budgets** (wall time, model calls, agent runs, tool calls, log/artifact
+  bytes) are clamped to the server `[automations]` ceilings, and **fan-out is bounded** at
+  every level — within a run by `max_parallelism` (concurrent leaf steps) and across the
+  service by `max_concurrent_runs` + `max_runs_per_user` — so neither one runaway automation
+  nor many due automations can exhaust the host/sbx. Standing scheduler load is bounded too: a
+  per-user `max_enabled_per_user` admission cap limits how many automations one user may have
+  enabled, and the scheduler's per-tick query excludes **manual** automations (scalar
+  `trigger`/`pending_fire` columns), so a user enabling many manual workflows can't make the
+  server reload + parse their definitions every tick. **Disk** (which the CPU/mem/PID/timeout
+  limits don't bound) is watched by a per-run scratch watchdog: it kills a run that exceeds
+  `max_workspace_mb` (the visible scratch) or drives the scratch filesystem below `min_free_mb`
+  free — the latter is a `statfs` guard that accounts blocks held by open-but-unlinked files a
+  directory walk can't see (killing the run frees them), polled **more frequently** than the
+  expensive per-run du-walk (it is cheap and is the cross-tenant backstop), with the run timeout
+  + post-run scratch removal bounding the worst case. The watchdog is a **best-effort backstop**,
+  not a hard boundary: a write-then-delete that completes entirely between polls can transiently
+  consume space. The **hard per-run disk quota** — which closes that sub-poll race — is a
+  quota-capable scratch filesystem on the `sbx` host (an XFS/ext4 project quota or a size-limited
+  volume backing the scratch root, where the write itself fails at the cap); provisioning and
+  validating it is part of the deferred `sbx`-host validation (like the rest of Phase 9's real
+  container enforcement). An `agent_cli` step's read-write credential/staging directory lives
+  in a SEPARATE per-run scratch (never mounted at `/workspace`, so a sibling/parallel step can't
+  read another step's agent credential store) that the same watchdog ALSO sizes — so the agent's
+  disk use counts against `max_workspace_mb` instead of escaping it. Promoted **artifacts** are size-capped, redacted, and written owner-private,
+  and an artifact download is scoped to the owner and confirmed to stay inside the
+  artifact root. The decrypt-to-run boundary from C5 applies: an unattended run needs
+  the server to decrypt the owner's granted secrets + mount agent-state, so they are
+  hidden from the DB/admin-UI but **not** from a malicious host/root. The scheduler is
+  **server-up-only** — a fire missed while the server was down defaults to `skip` (no
+  surprise backfill), and on shutdown every in-flight run is cancelled + finalized so
+  nothing lingers. Run records are an **append-only audit surface**: each deterministic
+  tool step writes a durable `sandbox_runs` row (pending before the side effect, finalized
+  after — so a crash mid-command still leaves evidence), and **deleting** an automation
+  *soft-deletes* it (hidden from the owner, scheduling stopped) rather than cascade-erasing
+  its run/artifact history. `mcp.call` validates but is unavailable in this build. Live `gh`/
+  agent container runs are validated on an `sbx`-equipped host.

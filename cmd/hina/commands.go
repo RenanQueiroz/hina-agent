@@ -317,6 +317,32 @@ enabled = false
 # providers = ["codex", "claude", "cursor"]  # allow-list (empty = all built-in)
 # local_endpoint = ""        # Pi's host-inference proxy base URL (Phase 11); empty = Pi off
 
+[automations]
+# User-owned scheduled workflows (Phase 9): a durable, server-up-only scheduler runs
+# automation.v1 documents inside the per-user sbx sandbox under each automation's own
+# permission profile, producing immutable run records + artifacts. Deterministic steps
+# (github.*/http.request/shell.exec) run before any model wakes; agent_cli steps reuse
+# the Phase 8 callable-agent boundary. Off by default; needs [sandbox] enabled + a
+# working sbx + the vault. Agent/secret-bearing automations also need
+# network_isolated=true (fail closed), and the owner must have authenticated the
+# referenced agents. The Max* fields are SERVER CEILINGS each automation's budget is
+# clamped to (a definition can ask for less, never more). Missed fires while the server
+# was down default to skip (run_once is opt-in per automation).
+enabled = false
+# tick = "5s"                # scheduler granularity
+# max_timeout = "30m"        # per-run wall-clock ceiling
+# max_model_calls = 50       # per-run model-call ceiling
+# max_agent_runs = 16        # per-run spawned-agent ceiling
+# max_tool_calls = 200       # per-run deterministic tool-call ceiling
+# max_log_bytes = 10485760   # per-run captured-log ceiling (10 MiB)
+# max_artifact_bytes = 52428800  # per-run TOTAL artifact ceiling (50 MiB)
+# max_parallelism = 8        # max concurrent leaf steps within one run (bounds sbx fan-out)
+# max_concurrent_runs = 16   # max automation runs executing at once across the service
+# max_runs_per_user = 4      # max concurrent runs per owner
+# max_enabled_per_user = 100 # max automations one user may have ENABLED at once (admission cap)
+# max_workspace_mb = 2048    # per-run scratch disk cap (a watchdog kills a run that exceeds it)
+# min_free_mb = 1024         # kill a run if the scratch filesystem free space drops below this (catches open-unlinked files)
+
 # [paths]  # optional overrides of the OS-resolved app directories
 # data_dir = "/var/lib/hina"
 # cache_dir = "/var/cache/hina"

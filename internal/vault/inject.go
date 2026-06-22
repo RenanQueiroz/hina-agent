@@ -153,7 +153,10 @@ func (r *Redactor) RedactJSON(data []byte) []byte {
 func (r *Redactor) redactJSONValue(v any) any {
 	switch t := v.(type) {
 	case string:
-		return r.Redact(t)
+		// RedactText (not Redact): a decoded string value can ITSELF carry a secret in its
+		// JSON-escaped form (a prior tool that printed json.Marshal of a credential), which a
+		// plaintext-only scrub would leave intact.
+		return r.RedactText(t)
 	case json.Number:
 		// A numeric secret (e.g. 31337) decodes to json.Number, whose string form holds
 		// the digits. If it carries a secret, return the redacted STRING (it can no longer
@@ -170,7 +173,7 @@ func (r *Redactor) redactJSONValue(v any) any {
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, val := range t {
-			out[r.Redact(k)] = r.redactJSONValue(val)
+			out[r.RedactText(k)] = r.redactJSONValue(val)
 		}
 		return out
 	default:
@@ -201,7 +204,9 @@ func (r *Redactor) JSONContainsSecret(data []byte) bool {
 func (r *Redactor) jsonValueContainsSecret(v any) bool {
 	switch t := v.(type) {
 	case string:
-		return r.ContainsSecret(t)
+		// ContainsSecretText (not ContainsSecret): a decoded string value can itself carry a
+		// secret in its JSON-escaped form, which a plaintext-only check would miss.
+		return r.ContainsSecretText(t)
 	case json.Number:
 		return r.ContainsSecret(string(t))
 	case []any:
@@ -213,7 +218,7 @@ func (r *Redactor) jsonValueContainsSecret(v any) bool {
 		return false
 	case map[string]any:
 		for k, val := range t {
-			if r.ContainsSecret(k) || r.jsonValueContainsSecret(val) {
+			if r.ContainsSecretText(k) || r.jsonValueContainsSecret(val) {
 				return true
 			}
 		}
@@ -238,9 +243,11 @@ func (r *Redactor) Merge(other *Redactor) *Redactor {
 	return NewRedactor(vals)
 }
 
-// MaxValueLen returns the length of the longest secret value (0 if none). Callers
-// truncating output use it as a safe margin: a secret split across a truncation
-// boundary leaves at most MaxValueLen-1 bytes that exact-match redaction can't catch.
+// MaxValueLen returns the length of the longest secret value in EITHER its plaintext or its
+// JSON-string-escaped form (0 if none). Callers truncating output use it as a safe margin: a
+// secret split across a truncation boundary leaves at most MaxValueLen-1 bytes that exact-match
+// redaction can't catch — and since RedactBytes/RedactText also scrub the (longer) escaped
+// form, the margin must cover that length too.
 func (r *Redactor) MaxValueLen() int {
 	if r == nil {
 		return 0
@@ -249,6 +256,9 @@ func (r *Redactor) MaxValueLen() int {
 	for _, v := range r.values {
 		if len(v) > max {
 			max = len(v)
+		}
+		if b, err := json.Marshal(v); err == nil && len(b)-2 > max {
+			max = len(b) - 2 // the escaped body length, sans the surrounding quotes
 		}
 	}
 	return max
@@ -265,12 +275,35 @@ func (r *Redactor) Redact(s string) string {
 	return s
 }
 
-// RedactBytes is the []byte form of Redact (for captured output buffers).
+// RedactText scrubs secret values from non-JSON text in BOTH their plaintext and
+// JSON-string-escaped (json.Marshal'd body) forms — so a credential rendered into an audit /
+// event summary via a json.Marshal'd object value (its `\n`/`\"`/`\\` escaping) is scrubbed,
+// not just a plaintext occurrence. It is the redaction counterpart of ContainsSecretText; use
+// it for any human-/log-facing summary that may embed an escaped secret.
+func (r *Redactor) RedactText(s string) string {
+	if r == nil {
+		return s
+	}
+	s = r.Redact(s) // plaintext forms (longest-first)
+	for _, v := range r.values {
+		if b, err := json.Marshal(v); err == nil && len(b) >= 2 {
+			if esc := string(b[1 : len(b)-1]); esc != v {
+				s = strings.ReplaceAll(s, esc, redactMark)
+			}
+		}
+	}
+	return s
+}
+
+// RedactBytes is the escaped-aware []byte form for captured output buffers: it scrubs both
+// the plaintext AND JSON-string-escaped form of every secret, so a tool/agent that echoes
+// json.Marshal(secret) can't persist the escaped credential into a capture file / run record /
+// artifact (which a plaintext-only scrub would leave intact).
 func (r *Redactor) RedactBytes(b []byte) []byte {
 	if r == nil || len(r.values) == 0 {
 		return b
 	}
-	return []byte(r.Redact(string(b)))
+	return []byte(r.RedactText(string(b)))
 }
 
 // ContainsSecret reports whether s contains any known secret value. Callers that
@@ -284,6 +317,30 @@ func (r *Redactor) ContainsSecret(s string) bool {
 	for _, v := range r.values {
 		if strings.Contains(s, v) {
 			return true
+		}
+	}
+	return false
+}
+
+// ContainsSecretText reports whether s carries a secret value either as PLAINTEXT or in its
+// JSON-string-escaped form. It catches a secret that reached a non-JSON outbound string (an
+// llm prompt, an agent argv) by way of a `json.Marshal`'d object/array value — whose `\n`/
+// `\"`/`\\` escaping a plaintext search would miss. For a payload that is itself JSON (a
+// schema, a marshaled inputs array), prefer JSONContainsSecret, which decodes ANY encoding.
+func (r *Redactor) ContainsSecretText(s string) bool {
+	if r == nil {
+		return false
+	}
+	if r.ContainsSecret(s) {
+		return true
+	}
+	for _, v := range r.values {
+		// json.Marshal escapes a value the SAME way template-expanding an object/array into the
+		// prompt does, so the escaped body it produces is exactly what would appear in s.
+		if b, err := json.Marshal(v); err == nil && len(b) >= 2 {
+			if esc := string(b[1 : len(b)-1]); esc != v && strings.Contains(s, esc) {
+				return true
+			}
 		}
 	}
 	return false

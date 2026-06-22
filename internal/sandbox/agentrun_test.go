@@ -381,6 +381,145 @@ func TestAgentRunProviderNotAllowed(t *testing.T) {
 	}
 }
 
+// An AUTOMATION agent run is bound by its OWN sandbox profile, NOT the user's interactive
+// Sandbox Environment tool policy — so HandleAutomation runs even when agent.<provider>.run
+// is removed from that interactive policy, while interactive Handle is still blocked (round-29).
+func TestAgentRunAutomationIgnoresInteractiveEnvPolicy(t *testing.T) {
+	ctx := context.Background()
+	k := newRouterKit(t, ApprovalAuto)
+	k.setProfile(t, "codex", "api_key")
+	_ = k.vault.PutAgentState(k.userID, "codex", EncodeCredState(CredKindKey, []byte("sk-x")))
+	// The user's interactive policy does NOT permit agent.codex.run (shell only).
+	k.setEnv(t, Environment{AllowedTools: []string{ToolShell}, Network: NetworkPolicy{Default: "deny"}})
+	k.runner.result = RunResult{ExitCode: 0, SandboxID: "sbx_x", Stdout: `{"type":"agent_message","message":"ok"}`}
+	ar := k.agentRouter("")
+
+	// Interactive Handle is still blocked by the env policy.
+	if res, _ := ar.Handle(ctx, k.scope(), agentCall("codex", "do it")); res.Err == "" || !strings.Contains(res.Err, "Sandbox Environment policy") {
+		t.Fatalf("interactive Handle must still honor the env policy, got %q", res.Err)
+	}
+	k.runner.called = false // reset
+
+	// The automation path runs regardless of the interactive tool policy.
+	res, err := ar.HandleAutomation(ctx, k.scope(), agentCall("codex", "do it"), AgentRunOptions{
+		Workspace: "/run/scratch", Workdir: "/workspace/pr", AutoApprove: true,
+	})
+	if err != nil {
+		t.Fatalf("HandleAutomation: %v", err)
+	}
+	if res.Err != "" {
+		t.Fatalf("an automation agent run must NOT be blocked by the interactive env policy: %s", res.Err)
+	}
+	if !k.runner.called {
+		t.Error("the automation agent run should have executed")
+	}
+}
+
+// When the automation runtime supplies a StateRoot, the agent's credential scratch must NOT
+// be removed when HandleAutomation returns — it lives under the caller-owned, watchdog-counted
+// dir, and removing it here would hide a fast over-cap credential-mount write from the run's
+// final disk check (round-61). The interactive path (no StateRoot) still cleans its own.
+func TestAgentRunAutomationLeavesStateScratchForCaller(t *testing.T) {
+	ctx := context.Background()
+	k := newRouterKit(t, ApprovalAuto)
+	k.setProfile(t, "codex", "api_key")
+	_ = k.vault.PutAgentState(k.userID, "codex", EncodeCredState(CredKindKey, []byte("sk-x")))
+	k.runner.result = RunResult{ExitCode: 0, SandboxID: "sbx_x", Stdout: `{"type":"agent_message","message":"ok"}`}
+	ar := k.agentRouter("")
+	stateRoot := t.TempDir()
+	res, err := ar.HandleAutomation(ctx, k.scope(), agentCall("codex", "do it"), AgentRunOptions{
+		Workspace: "/run/scratch", Workdir: "/workspace", AutoApprove: true, StateRoot: stateRoot,
+	})
+	if err != nil || res.Err != "" {
+		t.Fatalf("HandleAutomation: err=%v res.Err=%q", err, res.Err)
+	}
+	// The credential scratch must still be present under StateRoot (the caller cleans the whole
+	// root AFTER its final disk check) — proving it wasn't removed before that check.
+	entries, derr := os.ReadDir(stateRoot)
+	if derr != nil || len(entries) == 0 {
+		t.Fatalf("the automation agent state scratch must linger under StateRoot for the caller's disk check (entries=%d err=%v)", len(entries), derr)
+	}
+}
+
+// An UNATTENDED automation agent run must decide on the COMPLETE output: it parses the full
+// redacted capture file (not the 64 KiB inline stream) and fails closed if the capture was
+// truncated or couldn't be persisted — a later step must never act on a partial review (round-62).
+func TestAgentRunAutomationParsesFullCaptureFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	setup := func() (*routerKit, *AgentRouter) {
+		k := newRouterKit(t, ApprovalAuto)
+		k.setProfile(t, "codex", "api_key")
+		_ = k.vault.PutAgentState(k.userID, "codex", EncodeCredState(CredKindKey, []byte("sk-x")))
+		return k, k.agentRouter("")
+	}
+	opts := func() AgentRunOptions {
+		return AgentRunOptions{Workspace: "/run", Workdir: "/workspace", AutoApprove: true, StateRoot: t.TempDir()}
+	}
+
+	// (a) inline stream is partial but the capture FILE holds the full output -> parse the file.
+	k, ar := setup()
+	full := filepath.Join(t.TempDir(), "out")
+	if err := os.WriteFile(full, []byte(`{"type":"agent_message","message":"FULLMSG"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k.runner.result = RunResult{ExitCode: 0, SandboxID: "sbx", Stdout: `{"type":"agent_mess`, StdoutPath: full}
+	res, err := ar.HandleAutomation(ctx, k.scope(), agentCall("codex", "x"), opts())
+	if err != nil || res.Err != "" || !strings.Contains(res.Content, "FULLMSG") {
+		t.Fatalf("automation agent run must parse the FULL capture, got err=%v res.Err=%q content=%q", err, res.Err, res.Content)
+	}
+
+	// (b) the capture was truncated (output > capture cap) -> fail closed.
+	k2, ar2 := setup()
+	k2.runner.result = RunResult{ExitCode: 0, SandboxID: "sbx", Stdout: "{}", StdoutTruncated: true}
+	if res2, _ := ar2.HandleAutomation(ctx, k2.scope(), agentCall("codex", "x"), opts()); res2.Err == "" {
+		t.Fatal("a truncated agent capture must fail closed")
+	}
+
+	// (c) the output couldn't be captured at all -> fail closed.
+	k3, ar3 := setup()
+	k3.runner.result = RunResult{ExitCode: 0, SandboxID: "sbx", Stdout: "{}", CaptureErr: "disk full"}
+	if res3, _ := ar3.HandleAutomation(ctx, k3.scope(), agentCall("codex", "x"), opts()); res3.Err == "" {
+		t.Fatal("an agent capture error must fail closed")
+	}
+}
+
+// An agent_cli prompt carrying a vaulted secret in its JSON-ESCAPED form (a PEM with \n/\"/\\
+// that a template rendered into the prompt argv via a json.Marshal'd object) must be refused
+// before launch — the plaintext-only argv guard would miss it and put it on the sbx command
+// line + send it to the provider (round-69).
+func TestAgentRunRefusesJSONEscapedSecretInPrompt(t *testing.T) {
+	ctx := context.Background()
+	pem := "-----BEGIN KEY-----\nmid\"q\\b\n-----END KEY-----"
+	k := newRouterKit(t, ApprovalAuto)
+	k.setProfile(t, "codex", "api_key")
+	// The injected credential IS the PEM, so the run redactor knows it.
+	_ = k.vault.PutAgentState(k.userID, "codex", EncodeCredState(CredKindKey, []byte(pem)))
+	ar := k.agentRouter("")
+	// Build a prompt that embeds the secret in its json.Marshal'd (escaped) form.
+	obj, _ := json.Marshal(map[string]any{"key": pem})
+	res, err := ar.HandleAutomation(ctx, k.scope(), agentCall("codex", "use "+string(obj)), AgentRunOptions{
+		Workspace: "/run", Workdir: "/workspace", AutoApprove: true, StateRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("HandleAutomation: %v", err)
+	}
+	if res.Err == "" || !strings.Contains(res.Err, "secret") {
+		t.Fatalf("an escaped secret in the agent prompt must be refused, got %q", res.Err)
+	}
+	if k.runner.called {
+		t.Fatal("the runner must NOT be invoked when the prompt carries an (escaped) secret")
+	}
+	// The blocked-run audit summary must NOT persist the escaped (or plaintext) secret either.
+	pemEsc, _ := json.Marshal(pem)
+	escBody := string(pemEsc[1 : len(pemEsc)-1]) // the escaped PEM body that appeared in the prompt
+	runs, _ := k.store.ListSandboxRuns(ctx, k.userID, 10)
+	for _, r := range runs {
+		if strings.Contains(r.Command, pem) || strings.Contains(r.Command, escBody) {
+			t.Fatalf("the (escaped) secret leaked into the audit command: %q", r.Command)
+		}
+	}
+}
+
 func TestAgentRunBlockedByEnvironment(t *testing.T) {
 	ctx := context.Background()
 	k := newRouterKit(t, ApprovalAuto)
@@ -1491,4 +1630,64 @@ func hasEnv(env []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestAgentRunAutomationOverride is the Phase 9 plumbing: HandleAutomation mounts the
+// automation's OWN run scratch (not the durable workspace), sets the workdir from a
+// per-run checkout, and AUTO-APPROVES — while the interactive Handle on the same kit
+// is denied. It reuses the full credential/redaction/audit path unchanged.
+func TestAgentRunAutomationOverride(t *testing.T) {
+	ctx := context.Background()
+	k := newRouterKit(t, ApprovalAlways)
+	k.apr.approve = false // the interactive path would be DENIED here
+	k.setProfile(t, "codex", "api_key")
+	if err := k.vault.PutAgentState(k.userID, "codex", EncodeCredState(CredKindKey, []byte("sk-x"))); err != nil {
+		t.Fatal(err)
+	}
+	k.runner.result = RunResult{ExitCode: 0, SandboxID: "sbx_x", Stdout: `{"type":"agent_message","message":"ok"}`}
+	ar := k.agentRouter("")
+
+	// Sanity: interactive Handle is denied (ApprovalAlways + the approver denies).
+	if res, _ := ar.Handle(ctx, k.scope(), agentCall("codex", "do it")); res.Err == "" {
+		t.Fatal("interactive Handle should be denied here")
+	}
+	k.apr.gotReq = ApprovalRequest{} // reset so we can prove the approver isn't consulted
+
+	res, err := ar.HandleAutomation(ctx, k.scope(), agentCall("codex", "do it"), AgentRunOptions{
+		Workspace: "/run/scratch", Workdir: "/workspace/pr-42", AutoApprove: true,
+		Limits: Limits{CPUs: "1", Memory: "512m", PIDs: 64},
+	})
+	if err != nil {
+		t.Fatalf("HandleAutomation: %v", err)
+	}
+	if res.Err != "" {
+		t.Fatalf("automation run refused: %s", res.Err)
+	}
+	if k.apr.gotReq.Tool != "" {
+		t.Error("auto-approve must not consult the approver")
+	}
+	if k.runner.lastSpec.Workspace != "/run/scratch" {
+		t.Errorf("workspace = %q, want the run scratch (not the durable workspace)", k.runner.lastSpec.Workspace)
+	}
+	if k.runner.lastSpec.Workdir != "/workspace/pr-42" {
+		t.Errorf("workdir = %q, want /workspace/pr-42", k.runner.lastSpec.Workdir)
+	}
+	if k.runner.lastSpec.Limits.CPUs != "1" || k.runner.lastSpec.Limits.Memory != "512m" || k.runner.lastSpec.Limits.PIDs != 64 {
+		t.Errorf("agent run limits = %+v, want the per-automation caps", k.runner.lastSpec.Limits)
+	}
+}
+
+// HandleAutomation must REFUSE an empty workspace rather than falling back to the
+// user's durable workspace (round-3 finding).
+func TestAgentRunAutomationRejectsEmptyWorkspace(t *testing.T) {
+	k := newRouterKit(t, ApprovalAuto)
+	k.setProfile(t, "codex", "api_key")
+	if err := k.vault.PutAgentState(k.userID, "codex", EncodeCredState(CredKindKey, []byte("sk-x"))); err != nil {
+		t.Fatal(err)
+	}
+	ar := k.agentRouter("")
+	res, _ := ar.HandleAutomation(context.Background(), k.scope(), agentCall("codex", "do it"), AgentRunOptions{AutoApprove: true})
+	if res.Err == "" {
+		t.Fatal("an empty workspace override must be refused (no durable-workspace fallback)")
+	}
 }

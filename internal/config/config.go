@@ -20,17 +20,51 @@ import (
 
 // Config is the full server configuration.
 type Config struct {
-	Server   ServerConfig   `toml:"server"`
-	Agent    AgentConfig    `toml:"agent"`
-	LLM      LLMConfig      `toml:"llm"`
-	Realtime RealtimeConfig `toml:"realtime"`
-	TTS      TTSConfig      `toml:"tts"`
-	ASR      ASRConfig      `toml:"asr"`
-	Voice    VoiceConfig    `toml:"voice"`
-	Sandbox  SandboxConfig  `toml:"sandbox"`
-	Agents   AgentsConfig   `toml:"agents"`
-	Paths    PathsConfig    `toml:"paths"`
-	Log      LogConfig      `toml:"log"`
+	Server      ServerConfig      `toml:"server"`
+	Agent       AgentConfig       `toml:"agent"`
+	LLM         LLMConfig         `toml:"llm"`
+	Realtime    RealtimeConfig    `toml:"realtime"`
+	TTS         TTSConfig         `toml:"tts"`
+	ASR         ASRConfig         `toml:"asr"`
+	Voice       VoiceConfig       `toml:"voice"`
+	Sandbox     SandboxConfig     `toml:"sandbox"`
+	Agents      AgentsConfig      `toml:"agents"`
+	Automations AutomationsConfig `toml:"automations"`
+	Paths       PathsConfig       `toml:"paths"`
+	Log         LogConfig         `toml:"log"`
+}
+
+// AutomationsConfig configures the Phase 9 Automations subsystem: a durable,
+// server-up-only scheduler that runs user-owned workflows inside the sbx sandbox.
+// Off by default; it builds on [sandbox] (runs execute in sbx) and, for the agent/
+// secret paths, the same [sandbox] network_isolated + [agents] gates interactive
+// agent runs require. The Max* fields are the SERVER CEILINGS each automation's
+// own budget is clamped to (a definition can ask for less, never more).
+type AutomationsConfig struct {
+	Enabled           bool   `toml:"enabled"`              // turn on the scheduler (needs [sandbox])
+	Tick              string `toml:"tick"`                 // scheduler granularity, e.g. "5s"
+	MaxTimeout        string `toml:"max_timeout"`          // per-run wall-clock ceiling, e.g. "30m"
+	MaxModelCalls     int    `toml:"max_model_calls"`      // per-run model-call ceiling
+	MaxAgentRuns      int    `toml:"max_agent_runs"`       // per-run spawned-agent ceiling
+	MaxToolCalls      int    `toml:"max_tool_calls"`       // per-run deterministic tool-call ceiling
+	MaxLogBytes       int64  `toml:"max_log_bytes"`        // per-run captured-log ceiling
+	MaxArtifactByt    int64  `toml:"max_artifact_bytes"`   // per-run total artifact ceiling
+	MaxParallelism    int    `toml:"max_parallelism"`      // max concurrent leaf steps within a run
+	MaxConcurrentRuns int    `toml:"max_concurrent_runs"`  // max concurrent runs across the service (0 = unlimited)
+	MaxRunsPerUser    int    `toml:"max_runs_per_user"`    // max concurrent runs per owner (0 = unlimited)
+	MaxEnabledPerUser int    `toml:"max_enabled_per_user"` // max automations a user may have ENABLED at once (0 = unlimited)
+	MaxWorkspaceMB    int    `toml:"max_workspace_mb"`     // per-run scratch disk cap; a watchdog kills a run that exceeds it
+	MinFreeMB         int    `toml:"min_free_mb"`          // kill a run if the scratch filesystem free space drops below this (host-disk guard)
+}
+
+// TickOr parses Tick, falling back to def.
+func (a AutomationsConfig) TickOr(def time.Duration) time.Duration {
+	return parseDurationOr(a.Tick, def)
+}
+
+// MaxTimeoutOr parses MaxTimeout, falling back to def.
+func (a AutomationsConfig) MaxTimeoutOr(def time.Duration) time.Duration {
+	return parseDurationOr(a.MaxTimeout, def)
 }
 
 // AgentsConfig configures the callable coding-agent CLIs (Phase 8: Codex/Claude/
@@ -411,6 +445,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("HINA_AGENTS_LOCAL_ENDPOINT"); v != "" {
 		c.Agents.LocalEndpoint = v
 	}
+	if v := os.Getenv("HINA_AUTOMATIONS_ENABLED"); v != "" {
+		c.Automations.Enabled = v == "1" || v == "true"
+	}
 	if v := os.Getenv("HINA_REALTIME_ICE_SERVERS"); v != "" {
 		// Env is the simple STUN path: a comma-separated URL list, each its own
 		// server with no credentials. TURN (which needs credentials) is config-file
@@ -551,12 +588,19 @@ func (c Config) Validate() error {
 	}
 	for _, f := range []struct {
 		name, val string
-	}{{"sandbox.timeout", c.Sandbox.Timeout}, {"sandbox.scratch_ttl", c.Sandbox.ScratchTTL}, {"sandbox.approval_timeout", c.Sandbox.ApprovalTimeout}, {"agents.timeout", c.Agents.Timeout}} {
+	}{{"sandbox.timeout", c.Sandbox.Timeout}, {"sandbox.scratch_ttl", c.Sandbox.ScratchTTL}, {"sandbox.approval_timeout", c.Sandbox.ApprovalTimeout}, {"agents.timeout", c.Agents.Timeout}, {"automations.tick", c.Automations.Tick}, {"automations.max_timeout", c.Automations.MaxTimeout}} {
 		if f.val != "" {
 			if d, err := time.ParseDuration(f.val); err != nil || d < 0 {
 				return fmt.Errorf("%s %q must be a non-negative duration (e.g. \"5m\")", f.name, f.val)
 			}
 		}
+	}
+	// Automation per-run budget ceilings must be non-negative (0 = no server ceiling).
+	if c.Automations.MaxModelCalls < 0 || c.Automations.MaxAgentRuns < 0 || c.Automations.MaxToolCalls < 0 ||
+		c.Automations.MaxLogBytes < 0 || c.Automations.MaxArtifactByt < 0 || c.Automations.MaxParallelism < 0 ||
+		c.Automations.MaxConcurrentRuns < 0 || c.Automations.MaxRunsPerUser < 0 || c.Automations.MaxEnabledPerUser < 0 || c.Automations.MaxWorkspaceMB < 0 ||
+		c.Automations.MinFreeMB < 0 {
+		return fmt.Errorf("automations.max_* budget ceilings must be >= 0")
 	}
 	// Agents: validate the provider allow-list so a typo fails closed at load.
 	for _, p := range c.Agents.Providers {
