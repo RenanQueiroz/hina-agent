@@ -7,15 +7,15 @@ require (
 	github.com/openai/openai-go/v3 v3.41.0
 	github.com/pion/interceptor v0.1.45
 	github.com/pion/opus v0.1.0
-	github.com/pion/sdp/v3 v3.0.18
+	github.com/pion/sdp/v3 v3.0.19
 	github.com/pion/webrtc/v4 v4.2.15
 	github.com/tphakala/go-audio-resampler v1.4.0
 	github.com/yalue/onnxruntime_go v1.31.0
 	golang.org/x/crypto v0.53.0
-	golang.org/x/net v0.55.0
+	golang.org/x/net v0.56.0
 	golang.org/x/sys v0.46.0
 	golang.org/x/text v0.38.0
-	modernc.org/sqlite v1.52.0
+	modernc.org/sqlite v1.53.0
 )
 
 require (
@@ -44,7 +44,7 @@ require (
 	github.com/tphakala/simd v1.1.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/time v0.14.0 // indirect
-	modernc.org/libc v1.72.3 // indirect
+	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
